@@ -111,6 +111,40 @@ def hunter_domain_search(domain: str, company: str = "") -> dict:
     return {}
 
 
+def hunter_verify_email_address(email: str) -> dict:
+    """
+    Hunter.io email-verifier (automatic check, no manual step).
+    Returns {"verified": bool, "status": str | None, "disposable": bool}.
+    """
+    email = (email or "").strip()
+    key = getattr(config, "HUNTER_API_KEY", "") or ""
+    if not email or not key or "your_hunter" in key.lower():
+        return {"verified": False, "status": None, "disposable": False}
+    try:
+        resp = requests.get(
+            "https://api.hunter.io/v2/email-verifier",
+            params={"email": email, "api_key": key},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            _log_hunter_error("email-verifier", resp)
+            return {"verified": False, "status": str(resp.status_code), "disposable": False}
+        data = resp.json().get("data") or {}
+        status = (data.get("status") or data.get("result") or "").strip().lower()
+        disposable = bool(data.get("disposable"))
+        if disposable:
+            return {"verified": False, "status": status, "disposable": True}
+        good = {"valid", "deliverable"}
+        risky_ok = getattr(config, "HUNTER_VERIFY_ACCEPT_RISKY", False)
+        if status in good:
+            return {"verified": True, "status": status, "disposable": False}
+        if risky_ok and status in ("risky", "unknown"):
+            return {"verified": True, "status": status, "disposable": False}
+        return {"verified": False, "status": status or "none", "disposable": False}
+    except Exception:
+        return {"verified": False, "status": None, "disposable": False}
+
+
 def hunter_email_finder(domain: str, first_name: str = "HR", last_name: str = "") -> dict:
     """Guess a specific person's or role inbox via Hunter.io email finder."""
     if not config.HUNTER_API_KEY or "your_hunter" in config.HUNTER_API_KEY.lower():
@@ -363,6 +397,21 @@ COMMON_HR_PREFIXES = [
 ]
 
 
+def domain_blocked_for_guessing(domain: str) -> bool:
+    """True if we should not fabricate hr@… addresses on this host (consumer / wrong DDG hits)."""
+    d = (domain or "").strip().lower().replace("www.", "")
+    if not d or "." not in d:
+        return True
+    blocked = getattr(config, "BLOCKED_GUESS_EMAIL_DOMAINS", ()) or ()
+    for b in blocked:
+        b = (b or "").strip().lower()
+        if not b:
+            continue
+        if d == b or d.endswith("." + b):
+            return True
+    return False
+
+
 def guess_hr_emails(domain: str) -> list:
     if not domain:
         return []
@@ -415,6 +464,8 @@ def find_hr_emails(jobs: list) -> list:
 
         if not result.get("hr_email"):
             for dom in candidates:
+                if domain_blocked_for_guessing(dom):
+                    continue
                 guesses = guess_hr_emails(dom)
                 if guesses:
                     job["domain"] = dom
@@ -424,8 +475,21 @@ def find_hr_emails(jobs: list) -> list:
                     break
 
         if result.get("hr_email"):
+            note = ""
+            if (
+                result.get("hr_email_verified") is False
+                and getattr(config, "HUNTER_VERIFY_GUESSED_EMAILS", True)
+            ):
+                vr = hunter_verify_email_address(result["hr_email"])
+                if vr.get("verified"):
+                    result["hr_email_verified"] = True
+                    note = "  [Hunter verifier: OK]"
+                else:
+                    st = vr.get("status") or "not deliverable"
+                    note = f"  [Hunter verifier: {st}]"
+                time.sleep(0.2)
             job.update(result)
-            print(f"→ {result.get('hr_email', '?')}")
+            print(f"→ {result.get('hr_email', '?')}{note}")
         else:
             job["hr_email"] = ""
             job["domain"] = job.get("domain") or (candidates[0] if candidates else "")

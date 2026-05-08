@@ -4,6 +4,7 @@ Each scraper returns a list of dicts:
   { company, title, url, platform, domain, search_country? }
 """
 
+import os
 import time
 import random
 import re
@@ -198,7 +199,17 @@ def scrape_indeed(
         if getattr(config, "USE_BROWSER_FETCH", False):
             try:
                 full_url = _build_url(jobs_url, params)
-                html = browser_fetch.fetch_url(full_url)
+                storage = None
+                if getattr(config, "INDEED_USE_AUTH_STATE", False):
+                    p = config.auth_storage_path("indeed")
+                    if os.path.isfile(p):
+                        storage = p
+                    else:
+                        print(
+                            "  ⚠ Indeed: INDEED_USE_AUTH_STATE=True but no session file — "
+                            "run: python3 main.py --auth-indeed"
+                        )
+                html = browser_fetch.fetch_url(full_url, storage_state_path=storage)
             except Exception as e:
                 print(f"  ⚠ Indeed (Playwright): {e}")
 

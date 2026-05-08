@@ -4,6 +4,9 @@ Excel (xlsx) job tracking + skip rules for already-actioned roles.
 Columns are looked up by header name so you can reorder columns in Excel.
 Mark \"Applied on portal\", \"Application email sent\", or isEmailed=TRUE to skip application emails.
 Mark \"Follow-up email sent\" or isFollowed=TRUE to skip follow-up emails.
+
+Each search upserts rows by Job URL (with HR email when found). Fill HR email in the sheet and run
+`import_hr_from_xlsx_to_db` via `python3 main.py --sync-from-xlsx` to push addresses into SQLite for sending.
 """
 
 import os
@@ -24,6 +27,7 @@ HEADERS = [
     "Job title",
     "Platform",
     "Region",
+    "Company website",
     "Headcount note",
     "Application email sent",
     "Follow-up email sent",
@@ -199,10 +203,15 @@ def upsert_row(
             ws.cell(row=1, column=col, value=h)
             cmap = _header_map(ws)
 
-    url = normalize_job_url(job.get("url") or "")
+    raw_url = (job.get("url") or "").strip()
+    url = normalize_job_url(raw_url)
+    if not url:
+        wb.close()
+        return
+
     target_row = None
     for r in range(2, ws.max_row + 1):
-        if normalize_job_url(_cell(ws, cmap, r, "Job URL")) == url and url:
+        if normalize_job_url(_cell(ws, cmap, r, "Job URL")) == url:
             target_row = r
             break
 
@@ -218,11 +227,14 @@ def upsert_row(
             return
         ws.cell(row=target_row, column=c, value=value)
 
-    put("Job URL", job.get("url") or "", True)
+    put("Job URL", raw_url or job.get("url") or "", True)
     put("Company", job.get("company") or "", True)
     put("Job title", job.get("title") or job_title, True)
     put("Platform", job.get("platform") or "", True)
     put("Region", job.get("search_country") or "", True)
+    website = (job.get("company_website") or job.get("domain") or "").strip()
+    if website:
+        put("Company website", website, False)
     hn = job.get("headcount_note") or job.get("company_size") or ""
     put("Headcount note", hn, True)
     if application_email_sent:
@@ -233,14 +245,96 @@ def upsert_row(
         put("isFollowed", "TRUE", True)
     if applied_portal:
         put("Applied on portal", applied_portal, True)
-    if hr_email:
-        put("HR email", hr_email, True)
+    resolved_hr = (hr_email or (job.get("hr_email") or "")).strip()
+    if resolved_hr:
+        put("HR email", resolved_hr, True)
     if notes:
         put("Notes", notes, False)
+    elif not resolved_hr:
+        hint = (
+            "Find HR from job URL; add email in this column or Notes, then run: "
+            "python3 main.py --sync-from-xlsx"
+        )
+        put("Notes", hint, False)
     put("Updated at", datetime.now().strftime("%Y-%m-%d %H:%M"), True)
 
     wb.save(path)
     wb.close()
+
+
+def bulk_upsert_initial(jobs: list, job_title: str, path: str = None) -> tuple:
+    """
+    Write every scraped listing to the sheet BEFORE HR-email enrichment.
+    Opens the workbook once. Inserts new rows (keyed by Job URL); for existing rows,
+    only fills empty cells (won't overwrite manual edits or sent flags).
+    Returns (inserted, updated).
+    """
+    path = ensure_workbook(path)
+    _ensure_openpyxl()
+    wb = load_workbook(path)
+    ws = wb.active
+    cmap = _header_map(ws)
+    for h in HEADERS:
+        if h not in cmap:
+            col = ws.max_column + 1
+            ws.cell(row=1, column=col, value=h)
+    cmap = _header_map(ws)
+
+    existing = {}
+    for r in range(2, ws.max_row + 1):
+        nu = normalize_job_url(_cell(ws, cmap, r, "Job URL"))
+        if nu:
+            existing[nu] = r
+
+    inserted = 0
+    updated = 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for job in jobs:
+        raw_url = (job.get("url") or "").strip()
+        nu = normalize_job_url(raw_url)
+        if not nu:
+            continue
+        row = existing.get(nu)
+        if row is None:
+            row = ws.max_row + 1 if ws.max_row >= 1 else 2
+            ws.cell(row=row, column=cmap["Job URL"], value=raw_url)
+            existing[nu] = row
+            inserted += 1
+        else:
+            updated += 1
+
+        def fill(header, value, overwrite=False):
+            c = cmap.get(header)
+            if not c:
+                return
+            cur = ws.cell(row=row, column=c).value
+            if not value:
+                return
+            if not overwrite and cur not in (None, ""):
+                return
+            ws.cell(row=row, column=c, value=value)
+
+        fill("Company", job.get("company") or "")
+        fill("Job title", job.get("title") or job_title)
+        fill("Platform", job.get("platform") or "")
+        fill("Region", job.get("search_country") or "")
+        website = (job.get("company_website") or job.get("domain") or "").strip()
+        if website:
+            fill("Company website", website)
+        hn = job.get("headcount_note") or job.get("company_size") or ""
+        if hn:
+            fill("Headcount note", hn)
+        fill(
+            "Notes",
+            "Find HR from job URL; type email in HR email column, then run: "
+            "python3 main.py --sync-from-xlsx",
+        )
+        ws.cell(row=row, column=cmap["Updated at"], value=now)
+
+    wb.save(path)
+    wb.close()
+    return inserted, updated
 
 
 def sync_from_database(db, path: str = None) -> None:
@@ -269,6 +363,7 @@ def sync_from_database(db, path: str = None) -> None:
                 j.get("job_title") or "",
                 j.get("platform") or "",
                 j.get("search_country") or "",
+                j.get("domain") or "",
                 "",
                 app,
                 fu,
@@ -282,6 +377,51 @@ def sync_from_database(db, path: str = None) -> None:
         )
     wb.save(path)
     wb.close()
+
+
+def import_hr_from_xlsx_to_db(db, path: str = None) -> tuple:
+    """
+    Read Job URL + HR email from the tracking sheet and push into SQLite pending rows
+    (same normalized URL). Skips rows without URL or without HR email; does not change sent rows.
+    Returns (rows_updated, rows_skipped_no_match).
+    """
+    path = path or _xlsx_path()
+    if not os.path.isfile(path):
+        return 0, 0
+    _ensure_openpyxl()
+    wb = load_workbook(path, read_only=True)
+    ws = wb.active
+    it = ws.iter_rows(values_only=True)
+    try:
+        header = next(it)
+    except StopIteration:
+        wb.close()
+        return 0, 0
+    headers = [str(h or "").strip() for h in header]
+    col_map = {h: i for i, h in enumerate(headers)}
+    url_i = col_map.get("Job URL")
+    hr_i = col_map.get("HR email")
+    if url_i is None or hr_i is None:
+        wb.close()
+        return 0, 0
+
+    updated = 0
+    skipped = 0
+    for row in it:
+        if not row:
+            continue
+        url = str(row[url_i]).strip() if url_i < len(row) and row[url_i] else ""
+        hr = str(row[hr_i]).strip() if hr_i < len(row) and row[hr_i] else ""
+        nu = normalize_job_url(url)
+        if not nu or not hr:
+            continue
+        n = db.update_hr_by_normalized_job_url(nu, hr, "", verified=True)
+        if n:
+            updated += n
+        else:
+            skipped += 1
+    wb.close()
+    return updated, skipped
 
 
 def filter_jobs_not_skipped(jobs: list, skip_urls: set) -> tuple:

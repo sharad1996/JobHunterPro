@@ -4,6 +4,7 @@ Additional remote job sources (APIs + RSS + light HTML).
 Many sites are JS-heavy or login-gated; stubs log a short hint instead of failing silently.
 """
 
+import os
 import random
 import re
 import time
@@ -286,9 +287,20 @@ def scrape_wellfound(job_title: str, max_results: int = 30) -> list:
         try:
             import browser_fetch
 
+            storage = None
+            if getattr(config, "WELLFOUND_USE_AUTH_STATE", False):
+                p = config.auth_storage_path("wellfound")
+                if os.path.isfile(p):
+                    storage = p
+                else:
+                    print(
+                        "  ⚠ Wellfound: WELLFOUND_USE_AUTH_STATE=True but no session file — "
+                        "run: python3 main.py --auth-wellfound"
+                    )
             html = browser_fetch.fetch_url(
                 "https://wellfound.com/jobs",
                 params={"query": job_title},
+                storage_state_path=storage,
             )
             results = browser_fetch.parse_wellfound_jobs_html(html, job_title, max_results)
             print(f"  ✓ Wellfound (browser): {len(results)} results")

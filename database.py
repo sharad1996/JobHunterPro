@@ -8,6 +8,15 @@ from datetime import datetime, timedelta
 import config
 
 
+def _verified_to_int(v):
+    """SQLite hr_email_verified: 1 Hunter/manual, 0 guessed, NULL unknown (legacy)."""
+    if v is True or v == 1:
+        return 1
+    if v is False or v == 0:
+        return 0
+    return None
+
+
 class Database:
     def __init__(self, db_path=None):
         self.db_path = db_path or config.DB_PATH
@@ -57,6 +66,8 @@ class Database:
         colnames = {r[1] for r in rows}
         if "search_country" not in colnames:
             conn.execute("ALTER TABLE jobs ADD COLUMN search_country TEXT")
+        if "hr_email_verified" not in colnames:
+            conn.execute("ALTER TABLE jobs ADD COLUMN hr_email_verified INTEGER")
 
     # ─── Jobs ──────────────────────────────────────────────────────────────────
 
@@ -74,8 +85,8 @@ class Database:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """INSERT INTO jobs
-                   (job_title, company, company_domain, platform, job_url, hr_name, hr_email, search_country)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   (job_title, company, company_domain, platform, job_url, hr_name, hr_email, search_country, hr_email_verified)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     job_title,
                     job.get("company", ""),
@@ -85,6 +96,7 @@ class Database:
                     job.get("hr_name", ""),
                     job.get("hr_email", ""),
                     job.get("search_country") or "",
+                    _verified_to_int(job.get("hr_email_verified")),
                 )
             )
         return cur.lastrowid
@@ -108,10 +120,11 @@ class Database:
                 (company, job_title),
             ).fetchone()
             if row is None:
+                v_int = _verified_to_int(job.get("hr_email_verified"))
                 cur = conn.execute(
                     """INSERT INTO jobs
-                       (job_title, company, company_domain, platform, job_url, hr_name, hr_email, search_country)
-                       VALUES (?,?,?,?,?,?,?,?)""",
+                       (job_title, company, company_domain, platform, job_url, hr_name, hr_email, search_country, hr_email_verified)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
                     (
                         job_title,
                         company,
@@ -121,16 +134,18 @@ class Database:
                         hr_name,
                         hr_email,
                         search_country,
+                        v_int,
                     ),
                 )
                 return cur.lastrowid, "inserted"
             job_id = row["id"]
             if row["email_status"] != "pending":
                 return job_id, "unchanged"
+            v_int = _verified_to_int(job.get("hr_email_verified"))
             conn.execute(
-                """UPDATE jobs SET company_domain=?, platform=?, job_url=?, hr_name=?, hr_email=?, search_country=?
+                """UPDATE jobs SET company_domain=?, platform=?, job_url=?, hr_name=?, hr_email=?, search_country=?, hr_email_verified=?
                    WHERE id=?""",
-                (domain, platform, url, hr_name, hr_email, search_country, job_id),
+                (domain, platform, url, hr_name, hr_email, search_country, v_int, job_id),
             )
             return job_id, "updated"
 
@@ -144,12 +159,43 @@ class Database:
                 (status, now, follow_up, job_id)
             )
 
-    def update_hr_email(self, job_id: int, hr_email: str, hr_name: str = ""):
+    def update_hr_email(self, job_id: int, hr_email: str, hr_name: str = "", verified: bool = True):
+        """Manual adds count as verified by default so SMTP can send when SEND_ONLY_VERIFIED_EMAILS is on."""
+        v = 1 if verified else 0
         with self._get_conn() as conn:
             conn.execute(
-                "UPDATE jobs SET hr_email=?, hr_name=? WHERE id=?",
-                (hr_email, hr_name, job_id)
+                "UPDATE jobs SET hr_email=?, hr_name=?, hr_email_verified=? WHERE id=?",
+                (hr_email, hr_name, v, job_id),
             )
+
+    def update_hr_by_normalized_job_url(
+        self, normalized_url: str, hr_email: str, hr_name: str = "", verified: bool = True
+    ) -> int:
+        """
+        Apply an HR address to all *pending* rows whose job_url normalizes to the same key
+        (e.g. after editing the tracking sheet). Returns number of rows updated.
+        """
+        if not normalized_url or not (hr_email or "").strip():
+            return 0
+        import job_tracking
+
+        v = 1 if verified else 0
+        n = 0
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, job_url FROM jobs
+                   WHERE email_status = 'pending'
+                     AND job_url IS NOT NULL AND length(trim(job_url)) > 0"""
+            ).fetchall()
+            for r in rows:
+                ju = job_tracking.normalize_job_url(r["job_url"] or "")
+                if ju == normalized_url:
+                    conn.execute(
+                        "UPDATE jobs SET hr_email=?, hr_name=?, hr_email_verified=? WHERE id=?",
+                        ((hr_email or "").strip(), hr_name or "", v, r["id"]),
+                    )
+                    n += 1
+        return n
 
     def mark_followup_sent(self, job_id: int):
         with self._get_conn() as conn:

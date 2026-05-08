@@ -65,7 +65,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     from job_filters import filter_job_list
     from scrapers import search_all_platforms
     from email_finder import find_hr_emails
-    from email_sender import send_applications
+    from email_sender import send_applications, application_send_candidates
     from database import Database
 
     db = Database()
@@ -106,7 +106,17 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
 
     print(f"\n{GREEN}✅ {len(jobs)} listing(s) after filters & skip rules{RESET}")
 
-    # Enrich with HR emails
+    xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+    try:
+        ins, upd = job_tracking.bulk_upsert_initial(jobs, job_title)
+        print(
+            f"{CYAN}📒 Wrote {len(jobs)} listing(s) to {xlsx_path} "
+            f"({ins} new, {upd} already there) — before HR-email lookup. "
+            f"Open the sheet to add emails for any row.{RESET}"
+        )
+    except Exception as e:
+        print(f"{YELLOW}⚠️  Could not write initial rows to {xlsx_path}: {e}{RESET}")
+
     jobs_enriched = find_hr_emails(jobs)
 
     # Save / refresh jobs in DB (duplicates must be updated or HR emails stay empty)
@@ -127,6 +137,11 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
         f"\n{GREEN}💾 Database: {new_count} new, {updated_count} updated, "
         f"{len(jobs_enriched) - new_count - updated_count} unchanged (already sent or duplicate sent row){RESET}"
     )
+    print(
+        f"{CYAN}📎 HR emails refreshed in {xlsx_path} for jobs Hunter resolved. "
+        f"For the rest, add an address in the HR email column then "
+        f"`python3 main.py --sync-from-xlsx`.{RESET}"
+    )
 
     # Print results table
     print_results_table(jobs_enriched)
@@ -138,8 +153,9 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     )
     if guessed:
         print(
-            f"\n{YELLOW}⚠️  {guessed} address(es) are unverified pattern guesses (hr@, careers@…). "
-            f"Confirm on the company site or LinkedIn before sending.{RESET}"
+            f"\n{YELLOW}⚠️  {guessed} address(es) are still unverified after Hunter’s automatic check "
+            f"(verifier said undeliverable / risky, or API quota). "
+            f"They are not auto-sent while SEND_ONLY_VERIFIED_EMAILS is True — use --add-email if you know the address.{RESET}"
         )
 
     # Save per-job application + follow-up drafts (includes job URLs for manual outreach)
@@ -151,19 +167,44 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     # Prompt to send — must match DB pending rows, not in-memory count (duplicates / already-sent differ)
     has_email = sum(1 for j in jobs_enriched if j.get("hr_email"))
     if has_email == 0:
+        xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
         print(
             f"{RED}\nNo HR emails found via Hunter/guessing. "
-            f"Use job URLs in {draft_path} to apply on the site or find contacts, then add emails with --add-email.{RESET}"
+            f"Use job URLs in {draft_path} to find contacts.{RESET}"
+        )
+        print(
+            f"{GREEN}All {len(jobs_enriched)} listing(s) are still in {xlsx_path} (company, URL, platform). "
+            f"Add an address in the HR email column, then run:{RESET}\n"
+            f"  {CYAN}python3 main.py --sync-from-xlsx{RESET}\n"
+            f"{GREEN}Or use:{RESET} {CYAN}python3 main.py --add-email{RESET}"
         )
         return
 
-    pending_ready = len(db.get_pending_applications(job_title))
+    raw_pending = db.get_pending_applications(job_title)
+    eligible, send_meta = application_send_candidates(db, job_title)
+    pending_ready = len(eligible)
     if pending_ready == 0:
-        print(
-            f"{RED}\nNo pending application emails for job title \"{job_title}\" in the database "
-            f"(all matching rows may already be marked sent, or rows were not saved).{RESET}"
-        )
+        if not raw_pending:
+            print(
+                f"{RED}\nNo pending application emails for job title \"{job_title}\" in the database "
+                f"(all matching rows may already be marked sent, or rows were not saved).{RESET}"
+            )
+        else:
+            xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+            print(
+                f"{YELLOW}\nNo sendable pending rows: {len(raw_pending)} in the database for this title, "
+                f"but all were filtered (unverified guesses, tracking sheet, or invalid email). "
+                f"Use Hunter/--add-email or set SEND_ONLY_VERIFIED_EMAILS = False in config.py.{RESET}"
+            )
+            print(
+                f"{GREEN}Rows stay in {xlsx_path}. Add or fix HR email there, then:{RESET} "
+                f"{CYAN}python3 main.py --sync-from-xlsx{RESET}"
+            )
         return
+    if send_meta["unverified_skipped"] and getattr(config, "SEND_ONLY_VERIFIED_EMAILS", True):
+        print(
+            f"{YELLOW}\n  ({send_meta['unverified_skipped']} row(s) with guessed addresses excluded from send.){RESET}"
+        )
     if has_email != pending_ready:
         print(
             f"{YELLOW}\nNote: This run has addresses for {has_email} listing(s), but only {pending_ready} "
@@ -176,7 +217,12 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
             f"\n{BOLD}📨 Send application emails to {pending_ready} recipient(s) for \"{job_title}\" now? (y/n): {RESET}"
         ).strip().lower()
         if confirm != "y":
-            print(f"\n{CYAN}Emails saved. Run 'python3 main.py --list' to review before sending.{RESET}")
+            xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+            print(
+                f"\n{CYAN}No emails sent. Listings are in {xlsx_path}; add HR emails in the sheet, then "
+                f"python3 main.py --sync-from-xlsx, then python3 main.py --send-pending --job \"{job_title}\"{RESET}"
+            )
+            print(f"{CYAN}Or run 'python3 main.py --list' to review.{RESET}")
             return
 
     sent = send_applications(db, job_title, dry_run=dry_run)
@@ -184,6 +230,28 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     print(f"{CYAN}📅 Follow-up emails will be sent automatically in {config.FOLLOW_UP_DAYS} days.{RESET}")
     print(f"{CYAN}   Run 'python3 main.py --followup' any time to send due follow-ups.{RESET}")
     print(f"{CYAN}   Tracking sheet: {getattr(config, 'JOB_TRACKING_XLSX', 'job_tracking.xlsx')}{RESET}")
+
+
+def cmd_sync_from_xlsx():
+    """Push HR email column from job_tracking.xlsx into SQLite pending rows (by Job URL)."""
+    import config
+    import job_tracking
+    from database import Database
+
+    db = Database()
+    path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+    try:
+        updated, skipped = job_tracking.import_hr_from_xlsx_to_db(db, path)
+    except Exception as e:
+        print(f"\n{RED}Sync failed: {e}{RESET}")
+        return
+    print(f"\n{GREEN}✅ Updated {updated} database row(s) from {path}.{RESET}")
+    if skipped:
+        print(
+            f"{YELLOW}  {skipped} sheet row(s) had HR email but no matching pending job URL in the database "
+            f"(wrong URL, already sent, or add the job via a search first).{RESET}"
+        )
+    print(f"{CYAN}Then run: python3 main.py --send-pending [--job \"Your Title\"]{RESET}")
 
 
 def cmd_export_xlsx():
@@ -230,7 +298,35 @@ def cmd_send_pending(job_title: str = None, dry_run: bool = False):
     if sent > 0:
         print(f"\n{GREEN}✅ Sent {sent} application email(s).{RESET}")
     else:
-        print(f"\n{YELLOW}Nothing sent — no pending rows, or all skipped by the tracking sheet.{RESET}")
+        print(
+            f"\n{YELLOW}Nothing sent — no pending rows, or all skipped (tracking sheet, unverified guesses, or invalid email).{RESET}"
+        )
+
+
+def cmd_auth_save(platform: str, start_url: str):
+    """Interactive Playwright login; saves storage state for Indeed / Wellfound / Upwork fetches."""
+    import config
+    from browser_fetch import interactive_save_storage_state
+
+    print(
+        f"\n{YELLOW}If 'Continue with Google' fails or SMS codes never arrive, use the site's email/password "
+        f"login when offered — Google often blocks automated browsers.{RESET}\n"
+    )
+    path = config.auth_storage_path(platform)
+    interactive_save_storage_state(start_url, path, profile_key=platform)
+
+
+def cmd_auth_indeed():
+    cmd_auth_save("indeed", "https://secure.indeed.com/auth")
+
+
+def cmd_auth_wellfound():
+    cmd_auth_save("wellfound", "https://wellfound.com/login")
+
+
+def cmd_auth_upwork():
+    """Saves session JSON for a future browser-based Upwork search; GraphQL uses OAuth env vars."""
+    cmd_auth_save("upwork", "https://www.upwork.com/ab/account-security/login")
 
 
 # ─── Status dashboard ──────────────────────────────────────────────────────────
@@ -417,9 +513,10 @@ def interactive_menu():
   {CYAN}5.{RESET} ✏️   Add HR email manually (for companies missing one)
   {CYAN}6.{RESET} 📤  Export job tracking Excel from database
   {CYAN}7.{RESET} 📨  Send pending application emails (no new search)
-  {CYAN}8.{RESET} 🚪  Exit
+  {CYAN}8.{RESET} 🔄  Sync HR emails from Excel into database (by Job URL)
+  {CYAN}9.{RESET} 🚪  Exit
 """)
-        choice = input("Enter choice (1-8): ").strip()
+        choice = input("Enter choice (1-9): ").strip()
 
         if choice == "1":
             job_title = input("\n💼 Enter job title or technology (e.g. 'Python Developer', 'React', 'Data Analyst'): ").strip()
@@ -441,10 +538,12 @@ def interactive_menu():
             ).strip() or None
             cmd_send_pending(job_title=jt, dry_run=False)
         elif choice == "8":
+            cmd_sync_from_xlsx()
+        elif choice == "9":
             print(f"\n{GREEN}Good luck with your job search! 🚀{RESET}\n")
             sys.exit(0)
         else:
-            print(f"{RED}Invalid choice. Please enter 1-8.{RESET}")
+            print(f"{RED}Invalid choice. Please enter 1-9.{RESET}")
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
@@ -466,8 +565,15 @@ Examples:
   python3 main.py --export-xlsx
   python3 main.py --send-pending
   python3 main.py --send-pending --job "React Developer"
+  python3 main.py --auth-indeed
+  python3 main.py --auth-wellfound
+  python3 main.py --auth-upwork
+  python3 main.py --sync-from-xlsx
         """
     )
+    parser.add_argument("--auth-indeed", action="store_true", help="Save Indeed login session for Playwright (headed browser)")
+    parser.add_argument("--auth-wellfound", action="store_true", help="Save Wellfound login session for Playwright")
+    parser.add_argument("--auth-upwork", action="store_true", help="Save Upwork login session (reserved for browser fetch)")
     parser.add_argument("--job",      type=str, help="Job title or technology to search")
     parser.add_argument(
         "--send-pending",
@@ -479,6 +585,11 @@ Examples:
     parser.add_argument("--list",     action="store_true", help="List all tracked applications")
     parser.add_argument("--add-email",action="store_true", help="Manually add HR emails")
     parser.add_argument("--export-xlsx", action="store_true", help="Export SQLite jobs to Excel tracking sheet")
+    parser.add_argument(
+        "--sync-from-xlsx",
+        action="store_true",
+        help="Copy HR email cells from job_tracking.xlsx into pending SQLite rows (match by Job URL)",
+    )
     parser.add_argument("--dry-run",  action="store_true", help="Simulate without actually sending emails")
     args = parser.parse_args()
 
@@ -487,7 +598,15 @@ Examples:
         if not check_config():
             sys.exit(1)
 
-    if args.export_xlsx:
+    if args.auth_indeed:
+        cmd_auth_indeed()
+    elif args.auth_wellfound:
+        cmd_auth_wellfound()
+    elif args.auth_upwork:
+        cmd_auth_upwork()
+    elif args.sync_from_xlsx:
+        cmd_sync_from_xlsx()
+    elif args.export_xlsx:
         cmd_export_xlsx()
     elif args.send_pending:
         cmd_send_pending(job_title=args.job, dry_run=args.dry_run)

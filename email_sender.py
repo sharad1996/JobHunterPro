@@ -12,6 +12,53 @@ from email.utils import formatdate, make_msgid
 import config
 import templates
 from database import Database
+from email_finder import looks_valid_email
+
+
+def _db_row_verified_for_send(job: dict) -> bool:
+    """Hunter/manual (1); guessed (0); legacy NULL treated as unverified when strict."""
+    v = job.get("hr_email_verified")
+    return v is True or v == 1
+
+
+def application_send_candidates(db: Database, job_title: str):
+    """
+    Pending DB rows that pass tracking-sheet blocks, syntax check, and SEND_ONLY_VERIFIED_EMAILS.
+    Returns (candidates, meta) where meta has skip counts for messaging.
+    """
+    pending = db.get_pending_applications(job_title)
+    meta = {"sheet_skipped": 0, "unverified_skipped": 0, "invalid_syntax": 0}
+
+    jt = None
+    try:
+        import job_tracking as jt
+    except Exception:
+        jt = None
+
+    if jt is not None:
+        block_urls = jt.load_skip_url_set()
+        kept = []
+        for j in pending:
+            u = jt.normalize_job_url(j.get("job_url") or "")
+            if u and u in block_urls:
+                meta["sheet_skipped"] += 1
+                continue
+            kept.append(j)
+        pending = kept
+
+    strict = getattr(config, "SEND_ONLY_VERIFIED_EMAILS", True)
+    kept = []
+    for j in pending:
+        em = (j.get("hr_email") or "").strip()
+        if not looks_valid_email(em):
+            meta["invalid_syntax"] += 1
+            continue
+        if strict and not _db_row_verified_for_send(j):
+            meta["unverified_skipped"] += 1
+            continue
+        kept.append(j)
+
+    return kept, meta
 
 
 def _tracking_upsert(job_row: dict, job_title: str, **kwargs):
@@ -94,38 +141,24 @@ def _send_email(to_email: str, subject: str, body_text: str, body_html: str,
 def send_applications(db: Database, job_title: str, dry_run: bool = False) -> int:
     """
     Send one application email per pending row (each recipient gets its own message).
-    Skips rows whose Job URL is marked isEmailed / Application email sent / Applied on portal in the tracking sheet.
+    Skips tracking-sheet blocks, invalid addresses, and unverified guesses when SEND_ONLY_VERIFIED_EMAILS is True.
     """
-    pending = db.get_pending_applications(job_title)
+    pending, meta = application_send_candidates(db, job_title)
+
+    if meta["sheet_skipped"]:
+        print(
+            f"\n  ⏭️  Skipped {meta['sheet_skipped']} row(s): tracking sheet has isEmailed / application already marked."
+        )
+    if meta["invalid_syntax"]:
+        print(f"\n  ⏭️  Skipped {meta['invalid_syntax']} row(s): invalid email format in database.")
+    if meta["unverified_skipped"]:
+        print(
+            f"\n  ⏭️  Skipped {meta['unverified_skipped']} row(s): not verified (Hunter verifier failed / disabled, "
+            f"or no Hunter key). Set SEND_ONLY_VERIFIED_EMAILS = False to send without checks (risky)."
+        )
 
     if not pending:
-        print("\n  No pending applications to send.")
-        return 0
-
-    jt = None
-    try:
-        import job_tracking as jt
-    except Exception:
-        jt = None
-
-    if jt is not None:
-        block_urls = jt.load_skip_url_set()
-        kept = []
-        skipped = 0
-        for j in pending:
-            u = jt.normalize_job_url(j.get("job_url") or "")
-            if u and u in block_urls:
-                skipped += 1
-                continue
-            kept.append(j)
-        pending = kept
-        if skipped:
-            print(
-                f"\n  ⏭️  Skipped {skipped} row(s): tracking sheet has isEmailed / application already marked."
-            )
-
-    if not pending:
-        print("\n  No pending applications left after tracking-sheet rules.")
+        print("\n  No pending applications to send after filters.")
         return 0
 
     print(f"\n📨 Sending {len(pending)} separate application email(s) (one per job row)…\n")

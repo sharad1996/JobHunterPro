@@ -11,7 +11,7 @@ import os
 import json
 import random
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -26,6 +26,52 @@ HEADERS = {
 
 def _pause():
     time.sleep(random.uniform(0.8, 1.6))
+
+
+def upwork_refresh_access_token() -> Optional[str]:
+    """
+    Exchange UPWORK_REFRESH_TOKEN for a new access token (OAuth2 client credentials grant).
+    Updates os.environ for UPWORK_ACCESS_TOKEN and UPWORK_REFRESH_TOKEN in this process.
+    """
+    client_id = (os.environ.get("UPWORK_CLIENT_ID") or "").strip()
+    client_secret = (os.environ.get("UPWORK_CLIENT_SECRET") or "").strip()
+    refresh = (os.environ.get("UPWORK_REFRESH_TOKEN") or "").strip()
+    if not (client_id and client_secret and refresh):
+        return None
+    try:
+        r = requests.post(
+            "https://www.upwork.com/api/v3/oauth2/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            print(f"  ✗ Upwork token refresh: HTTP {r.status_code} — {r.text[:200]}")
+            return None
+        data = r.json()
+        access = (data.get("access_token") or "").strip()
+        new_refresh = (data.get("refresh_token") or refresh).strip()
+        if access:
+            os.environ["UPWORK_ACCESS_TOKEN"] = access
+            os.environ["UPWORK_REFRESH_TOKEN"] = new_refresh
+            print("  → Upwork: refreshed access token (in-memory env updated for this run).")
+        return access or None
+    except Exception as e:
+        print(f"  ✗ Upwork token refresh error: {e}")
+        return None
+
+
+def upwork_resolve_access_token() -> str:
+    """Use UPWORK_ACCESS_TOKEN if set; otherwise try refresh_token exchange."""
+    t = (os.environ.get("UPWORK_ACCESS_TOKEN") or "").strip()
+    if t:
+        return t
+    return (upwork_refresh_access_token() or "").strip()
 
 
 def scrape_freelancer(job_title: str, max_results: int = 30) -> List[Dict[str, Any]]:
@@ -73,15 +119,15 @@ def scrape_freelancer(job_title: str, max_results: int = 30) -> List[Dict[str, A
 
 def scrape_upwork(job_title: str, max_results: int = 30) -> List[Dict[str, Any]]:
     """
-    Upwork GraphQL (OAuth2 bearer). Set env UPWORK_ACCESS_TOKEN.
-    Query shape may need adjustment as Upwork evolves — errors print a short hint.
+    Upwork GraphQL (OAuth2 bearer). Set UPWORK_ACCESS_TOKEN, or UPWORK_REFRESH_TOKEN +
+    UPWORK_CLIENT_ID + UPWORK_CLIENT_SECRET (see INTEGRATIONS.md).
     """
     results: List[Dict[str, Any]] = []
-    token = (os.environ.get("UPWORK_ACCESS_TOKEN") or "").strip()
+    token = upwork_resolve_access_token()
     if not token:
         print(
-            "  → Upwork: skipped — set env UPWORK_ACCESS_TOKEN (OAuth bearer; "
-            "see INTEGRATIONS.md)"
+            "  → Upwork: skipped — set UPWORK_ACCESS_TOKEN or "
+            "UPWORK_REFRESH_TOKEN + UPWORK_CLIENT_ID + UPWORK_CLIENT_SECRET (see INTEGRATIONS.md)"
         )
         return results
 
@@ -104,12 +150,13 @@ def scrape_upwork(job_title: str, max_results: int = 30) -> List[Dict[str, Any]]
       }
     }
     """
-    try:
-        r = requests.post(
+
+    def _post(bearer: str):
+        return requests.post(
             endpoint,
             headers={
                 **HEADERS,
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {bearer}",
                 "Content-Type": "application/json",
             },
             data=json.dumps(
@@ -120,6 +167,14 @@ def scrape_upwork(job_title: str, max_results: int = 30) -> List[Dict[str, Any]]
             ),
             timeout=30,
         )
+
+    try:
+        r = _post(token)
+        if r.status_code == 401:
+            new_t = upwork_refresh_access_token()
+            if new_t:
+                r = _post(new_t)
+                token = new_t
         if r.status_code != 200:
             print(f"  ✗ Upwork: HTTP {r.status_code} — {r.text[:200]}")
             return results

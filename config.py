@@ -6,10 +6,9 @@
 
 SETUP STEPS:
   1. Fill in your Gmail credentials (see README for App Password guide)
-  2. Get a free Hunter.io API key at: https://hunter.io/users/sign_up
-  3. Fill in your personal details for email personalization
-  4. Put your resume PDF in the same folder as this script
-  5. Run: python3 main.py
+  2. Fill in your personal details for email personalization
+  3. Put your resume PDF in the same folder as this script
+  4. Run: python3 main.py
 """
 
 import os
@@ -22,29 +21,42 @@ GMAIL_PASSWORD = "xokz ockp mqqq oasw"          # 16-char App Password (NOT your
                                                  # Get it at: myaccount.google.com > Security > App Passwords
 
 # ─────────────────────────────────────────────
-# 🔍 HUNTER.IO API (Email Finder)
+# 📧 CONTACT PAGE EMAIL SCRAPING
 # ─────────────────────────────────────────────
-HUNTER_API_KEY = "fcae5c359d6266b5282990b87345bbffa4f7544b"     # Free key: https://hunter.io (25 searches/month free)
+# Scrape company websites (contact / contact-us pages) for public email addresses.
+CONTACT_PAGE_SCRAPE_ENABLED = True
 
-# When domain-search returns nothing, try Hunter “email finder” for common role names (uses extra credits)
-HUNTER_EMAIL_FINDER_FALLBACK = True
+# Relative paths tried on each candidate domain (https first, then http).
+CONTACT_PAGE_PATHS = (
+    "/contact",
+    "/contact-us",
+    "/contactus",
+    "/contact_us",
+    "/about/contact",
+    "/company/contact",
+    "/en/contact",
+    "/support/contact",
+    "/get-in-touch",
+    "/reach-us",
+)
+
+# Also scan the homepage for mailto: links and “Contact” navigation links.
+CONTACT_SCRAPE_HOMEPAGE = True
+
+# Use Playwright for contact pages when plain HTTP fails (falls back to USE_BROWSER_FETCH if None).
+CONTACT_SCRAPE_USE_BROWSER = None
 
 # If DuckDuckGo instant API has no answer, scrape lightweight HTML results (helps for many companies)
 USE_DDG_HTML_DOMAIN_LOOKUP = True
 
+# When backfilling job_tracking.xlsx (--fill-hr-emails), only write pattern guesses if True.
+FILL_XLSX_INCLUDE_GUESSES = False
+
 # If True, Gmail only sends addresses that count as “verified” in the database:
-#   • Hunter domain-search / email-finder results (automatic), OR
-#   • Pattern guesses that passed Hunter’s email-verifier API (automatic if HUNTER_VERIFY_GUESSED_EMAILS), OR
-#   • Addresses you add with --add-email (still optional).
-# If False, guessed hr@… addresses are sent without any check (many bounces / bad delivery).
+#   • Emails found on the company contact page (automatic), OR
+#   • Addresses you add with --add-email / the Excel HR email column.
+# If False, guessed hr@… addresses are sent without a contact-page match (more bounces).
 SEND_ONLY_VERIFIED_EMAILS = True
-
-# After a pattern guess (hr@company.com), call Hunter’s email-verifier automatically — no manual checking.
-# Uses one Hunter request per guessed address (counts against your Hunter plan). Needs a valid HUNTER_API_KEY.
-HUNTER_VERIFY_GUESSED_EMAILS = True
-
-# If True, treat Hunter verifier status “risky” / “unknown” as good enough to send (more sends, more risk).
-HUNTER_VERIFY_ACCEPT_RISKY = False
 
 # Domains to never use for hr@ / careers@ pattern guessing (consumer sites / wrong DDG hits).
 BLOCKED_GUESS_EMAIL_DOMAINS = (

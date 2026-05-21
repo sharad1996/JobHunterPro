@@ -4,6 +4,8 @@ Additional remote job sources (APIs + RSS + light HTML).
 Many sites are JS-heavy or login-gated; stubs log a short hint instead of failing silently.
 """
 
+import compat  # noqa: F401 — before requests/urllib3
+
 import os
 import random
 import re

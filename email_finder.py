@@ -5,17 +5,17 @@ Strategy (in order):
   1. Infer corporate domain from job posting URL (ATS / careers subdomains)
   2. DuckDuckGo instant answer, then optional HTML search fallback
   3. Normalized company-name → simple domain guesses (e.g. acme.com)
-  4. Hunter.io domain search (personal + generic mailboxes)
-  5. Hunter.io email-finder for common local-parts (careers, hr, …)
-  6. Pattern guessing (hr@, careers@, …) on the best domain candidate
+  4. Scrape company website contact / contact-us pages for published emails
+  5. Pattern guessing (hr@, careers@, …) on the best domain candidate (unverified)
 """
 
-import json
+import compat  # noqa: F401 — before requests/urllib3
+
 import re
 import time
-import requests
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 
 import config
@@ -31,166 +31,275 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-_HUNTER_LOGGED_ERRORS = set()
+_EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9][a-zA-Z0-9._%+\-]*@[a-zA-Z0-9][a-zA-Z0-9.\-]*\.[a-zA-Z]{2,}",
+)
+
+_EMAIL_JUNK_LOCAL = (
+    "noreply", "no-reply", "donotreply", "do-not-reply", "mailer-daemon",
+    "postmaster", "abuse", "unsubscribe", "newsletter", "marketing",
+    "privacy", "legal", "dmca", "webmaster", "sentry", "wixpress",
+    "example", "test", "placeholder", "yourname", "email@",
+)
+
+_EMAIL_JUNK_DOMAINS = (
+    "example.com", "email.com", "domain.com", "sentry.io", "wix.com",
+    "schema.org", "w3.org", "googleapis.com", "cloudflare.com",
+    "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
+    "youtube.com", "gravatar.com", "github.com",
+)
+
+_HR_LOCAL_KEYWORDS = (
+    "hr", "career", "careers", "jobs", "job", "recruit", "recruiting",
+    "talent", "hiring", "people", "humanresources", "employment",
+    "contact", "info", "hello", "enquiry", "inquiry", "support",
+)
+
+_CONTACT_LINK_KEYWORDS = (
+    "contact", "get-in-touch", "getintouch", "reach-us", "reachus",
+    "contact-us", "contactus", "write-us", "talk-to-us",
+)
 
 
-def _log_hunter_error(endpoint: str, resp: requests.Response) -> None:
-    """Log Hunter non-200 once per (endpoint, status) so quota issues are visible."""
-    key = (endpoint, resp.status_code)
-    if key in _HUNTER_LOGGED_ERRORS:
-        return
-    _HUNTER_LOGGED_ERRORS.add(key)
+def _contact_scrape_use_browser() -> bool:
+    explicit = getattr(config, "CONTACT_SCRAPE_USE_BROWSER", None)
+    if explicit is not None:
+        return bool(explicit)
+    return bool(getattr(config, "USE_BROWSER_FETCH", False))
+
+
+def _fetch_page_html(url: str) -> str:
+    """Fetch page HTML via HTTP; optionally Playwright when configured."""
     try:
-        data = resp.json()
-        snippet = data.get("errors", data)
-        msg = json.dumps(snippet)[:300]
+        resp = requests.get(url, headers=_HEADERS, timeout=14, allow_redirects=True)
+        if resp.status_code == 200 and resp.text and len(resp.text) > 200:
+            return resp.text
     except Exception:
-        msg = (resp.text or "")[:200]
-    hint = ""
-    if resp.status_code in (402, 403, 429):
-        hint = " — often monthly quota or plan limit; check dashboard.hunter.io"
-    print(f"\n  ⚠️  Hunter.io {endpoint} HTTP {resp.status_code}{hint}: {msg}")
+        pass
+
+    if not _contact_scrape_use_browser():
+        return ""
+
+    try:
+        import browser_fetch
+
+        return browser_fetch.fetch_url(url, timeout_ms=45000) or ""
+    except Exception:
+        return ""
 
 
-# ─── Hunter.io API ────────────────────────────────────────────────────────────
+def _decode_email_obfuscation(text: str) -> str:
+    """Normalize common obfuscations: user [at] domain [dot] com."""
+    t = text or ""
+    t = re.sub(r"\s*\[\s*at\s*\]\s*", "@", t, flags=re.I)
+    t = re.sub(r"\s*\(\s*at\s*\)\s*", "@", t, flags=re.I)
+    t = re.sub(r"\s+at\s+", "@", t, flags=re.I)
+    t = re.sub(r"\s*\[\s*dot\s*\]\s*", ".", t, flags=re.I)
+    t = re.sub(r"\s*\(\s*dot\s*\)\s*", ".", t, flags=re.I)
+    return t
 
-def hunter_domain_search(domain: str, company: str = "") -> dict:
+
+def _is_junk_email(email: str) -> bool:
+    e = (email or "").strip().lower()
+    if not e or "@" not in e:
+        return True
+    local, _, domain = e.partition("@")
+    if any(j in local for j in _EMAIL_JUNK_LOCAL):
+        return True
+    if any(domain == d or domain.endswith("." + d) for d in _EMAIL_JUNK_DOMAINS):
+        return True
+    if e.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")):
+        return True
+    return False
+
+
+def _extract_emails_from_html(html: str) -> list:
+    if not html:
+        return []
+    text = _decode_email_obfuscation(html)
+    found = []
+    seen = set()
+
+    for match in _EMAIL_RE.findall(text):
+        em = match.strip().rstrip(".,;:)")
+        key = em.lower()
+        if key in seen or _is_junk_email(em):
+            continue
+        seen.add(key)
+        found.append(em)
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.select('a[href^="mailto:"]'):
+            href = (a.get("href") or "").split("?", 1)[0]
+            raw = href.replace("mailto:", "").strip()
+            if raw and not _is_junk_email(raw):
+                key = raw.lower()
+                if key not in seen:
+                    seen.add(key)
+                    found.append(raw)
+    except Exception:
+        pass
+
+    return found
+
+
+def _email_domain_match(email: str, domain: str) -> bool:
+    dom = (domain or "").lower().replace("www.", "")
+    ed = (email.split("@")[-1] if "@" in email else "").lower()
+    if not dom or not ed:
+        return False
+    return ed == dom or ed.endswith("." + dom) or dom.endswith("." + ed)
+
+
+def _score_email_for_hr(email: str, domain: str) -> int:
+    e = email.lower()
+    local = e.split("@", 1)[0]
+    score = 0
+    if _email_domain_match(email, domain):
+        score += 50
+    for i, kw in enumerate(_HR_LOCAL_KEYWORDS):
+        if kw in local:
+            score += 30 - min(i, 20)
+            break
+    if any(x in local for x in ("sales", "billing", "invoice", "press", "media", "pr@")):
+        score -= 15
+    return score
+
+
+def _pick_best_hr_email(emails: list, domain: str) -> str:
+    if not emails:
+        return ""
+    on_domain = [e for e in emails if _email_domain_match(e, domain)]
+    pool = on_domain if on_domain else emails
+    ranked = sorted(pool, key=lambda e: _score_email_for_hr(e, domain), reverse=True)
+    return ranked[0] if ranked else ""
+
+
+def _discover_contact_urls(html: str, base_url: str, domain: str) -> list:
+    """Find contact-page links from homepage navigation."""
+    urls = []
+    seen = set()
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return urls
+
+    dom = domain.lower().replace("www.", "")
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith("#") or href.startswith("javascript:"):
+            continue
+        text = (a.get_text() or "").lower()
+        path = href.lower()
+        if not any(k in path or k in text for k in _CONTACT_LINK_KEYWORDS):
+            continue
+        full = urljoin(base_url, href)
+        try:
+            p = urlparse(full)
+        except Exception:
+            continue
+        host = (p.netloc or "").lower().replace("www.", "")
+        if host and host != dom and not host.endswith("." + dom):
+            continue
+        if full not in seen:
+            seen.add(full)
+            urls.append(full)
+    return urls[:8]
+
+
+def _urls_for_domain(domain: str) -> list:
+    """Ordered URLs to fetch for contact-page email discovery."""
+    dom = (domain or "").strip().lower().replace("www.", "")
+    if not dom or "." not in dom:
+        return []
+
+    paths = getattr(config, "CONTACT_PAGE_PATHS", ()) or (
+        "/contact", "/contact-us", "/contactus",
+    )
+    hosts = [dom]
+    if not dom.startswith("www."):
+        hosts.append(f"www.{dom}")
+
+    urls = []
+    seen = set()
+    for host in hosts:
+        for path in paths:
+            path = path if path.startswith("/") else f"/{path}"
+            for scheme in ("https", "http"):
+                u = f"{scheme}://{host}{path}"
+                if u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+        if getattr(config, "CONTACT_SCRAPE_HOMEPAGE", True):
+            for scheme in ("https", "http"):
+                u = f"{scheme}://{host}/"
+                if u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+    return urls
+
+
+def scrape_contact_page_emails(domain: str) -> dict:
     """
-    Search Hunter.io for emails at a domain.
-    Returns: { hr_name, hr_email } or empty dict.
+    Visit company contact pages and extract a suitable HR/contact email.
+    Returns: { hr_email, hr_name, hr_email_verified, contact_source_url } or {}.
     """
-    if not config.HUNTER_API_KEY or "your_hunter" in config.HUNTER_API_KEY.lower():
+    if not getattr(config, "CONTACT_PAGE_SCRAPE_ENABLED", True):
         return {}
 
-    try:
-        url = "https://api.hunter.io/v2/domain-search"
-        params = {
-            "domain": domain,
-            "api_key": config.HUNTER_API_KEY,
-            "limit": 15,
-            # Omit "type" so we get both personal and generic (careers@, …) when available
-        }
-        resp = requests.get(url, params=params, timeout=12)
-        if resp.status_code != 200:
-            _log_hunter_error("domain-search", resp)
-            return {}
+    dom = (domain or "").strip().lower().replace("www.", "")
+    if not dom:
+        return {}
 
-        data = resp.json().get("data", {})
-        emails = data.get("emails", [])
+    all_emails = []
+    source_url = ""
+    extra_urls = []
+    fetch_urls = _urls_for_domain(dom)
 
-        hr_keywords = ["hr", "recruit", "talent", "people", "hiring", "career"]
-        for e in emails:
-            title = (e.get("position") or "").lower()
-            if any(k in title for k in hr_keywords):
-                return {
-                    "hr_email": e.get("value", ""),
-                    "hr_name": f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
-                    "hr_email_verified": True,
-                }
+    for url in fetch_urls:
+        html = _fetch_page_html(url)
+        if not html:
+            continue
+        emails = _extract_emails_from_html(html)
+        if emails and not source_url:
+            source_url = url
+        all_emails.extend(emails)
 
-        # Prefer generic department inboxes if present
-        for e in emails:
-            v = (e.get("value") or "").lower()
-            if any(x in v for x in ("careers@", "jobs@", "hr@", "talent@", "recruit@", "people@")):
-                return {
-                    "hr_email": e.get("value", ""),
-                    "hr_name": f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
-                    "hr_email_verified": True,
-                }
+        if getattr(config, "CONTACT_SCRAPE_HOMEPAGE", True) and url.rstrip("/").endswith(dom):
+            extra_urls.extend(_discover_contact_urls(html, url, dom))
 
+        if all_emails and _pick_best_hr_email(all_emails, dom):
+            break
+        time.sleep(0.12)
+
+    for url in extra_urls:
+        if url in fetch_urls:
+            continue
+        html = _fetch_page_html(url)
+        if not html:
+            continue
+        emails = _extract_emails_from_html(html)
         if emails:
-            e = emails[0]
-            return {
-                "hr_email": e.get("value", ""),
-                "hr_name": f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
-                "hr_email_verified": True,
-            }
+            if not source_url:
+                source_url = url
+            all_emails.extend(emails)
+            if _pick_best_hr_email(all_emails, dom):
+                break
+        time.sleep(0.12)
 
-    except Exception:
-        pass
-    return {}
-
-
-def hunter_verify_email_address(email: str) -> dict:
-    """
-    Hunter.io email-verifier (automatic check, no manual step).
-    Returns {"verified": bool, "status": str | None, "disposable": bool}.
-    """
-    email = (email or "").strip()
-    key = getattr(config, "HUNTER_API_KEY", "") or ""
-    if not email or not key or "your_hunter" in key.lower():
-        return {"verified": False, "status": None, "disposable": False}
-    try:
-        resp = requests.get(
-            "https://api.hunter.io/v2/email-verifier",
-            params={"email": email, "api_key": key},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            _log_hunter_error("email-verifier", resp)
-            return {"verified": False, "status": str(resp.status_code), "disposable": False}
-        data = resp.json().get("data") or {}
-        status = (data.get("status") or data.get("result") or "").strip().lower()
-        disposable = bool(data.get("disposable"))
-        if disposable:
-            return {"verified": False, "status": status, "disposable": True}
-        good = {"valid", "deliverable"}
-        risky_ok = getattr(config, "HUNTER_VERIFY_ACCEPT_RISKY", False)
-        if status in good:
-            return {"verified": True, "status": status, "disposable": False}
-        if risky_ok and status in ("risky", "unknown"):
-            return {"verified": True, "status": status, "disposable": False}
-        return {"verified": False, "status": status or "none", "disposable": False}
-    except Exception:
-        return {"verified": False, "status": None, "disposable": False}
-
-
-def hunter_email_finder(domain: str, first_name: str = "HR", last_name: str = "") -> dict:
-    """Guess a specific person's or role inbox via Hunter.io email finder."""
-    if not config.HUNTER_API_KEY or "your_hunter" in config.HUNTER_API_KEY.lower():
+    best = _pick_best_hr_email(all_emails, dom)
+    if not best:
         return {}
-    try:
-        params = {
-            "domain": domain,
-            "first_name": first_name,
-            "last_name": last_name,
-            "api_key": config.HUNTER_API_KEY,
-        }
-        resp = requests.get("https://api.hunter.io/v2/email-finder", params=params, timeout=12)
-        if resp.status_code != 200:
-            _log_hunter_error("email-finder", resp)
-            return {}
-        data = resp.json().get("data", {})
-        email = data.get("email", "")
-        score = data.get("score", 0)
-        if email and score and int(score) > 40:
-            return {
-                "hr_email": email,
-                "hr_name": f"{first_name} {last_name}".strip(),
-                "hr_email_verified": True,
-            }
-    except Exception:
-        pass
-    return {}
 
-
-def _hunter_role_fallback(domain: str) -> dict:
-    """Try common recruiting mailboxes via Email Finder (config-gated)."""
-    if not getattr(config, "HUNTER_EMAIL_FINDER_FALLBACK", True):
-        return {}
-    for first, last in [
-        ("careers", ""),
-        ("jobs", ""),
-        ("hr", ""),
-        ("talent", ""),
-        ("recruiting", ""),
-        ("people", ""),
-    ]:
-        r = hunter_email_finder(domain, first, last)
-        if r.get("hr_email"):
-            return r
-        time.sleep(0.15)
-    return {}
+    out = {
+        "hr_email": best,
+        "hr_name": "",
+        "hr_email_verified": True,
+    }
+    if source_url:
+        out["contact_source_url"] = source_url
+    return out
 
 
 # ─── Domain from job URL (ATS / careers) ─────────────────────────────────────
@@ -364,8 +473,28 @@ def slug_domain_guesses(company_name: str) -> list:
     return [f"{slug}.com", f"{slug}.io"]
 
 
-def collect_domain_candidates(company: str, job_url: str) -> list:
-    """Ordered unique domain candidates to try with Hunter."""
+def domain_from_website_field(website: str) -> str:
+    """Normalize Company website cell (URL or bare domain) to a hostname."""
+    w = (website or "").strip()
+    if not w:
+        return ""
+    if "@" in w:
+        return ""
+    if not w.startswith(("http://", "https://")):
+        w = "https://" + w
+    try:
+        host = urlparse(w).netloc.lower()
+    except Exception:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host if "." in host else ""
+
+
+def collect_domain_candidates(
+    company: str, job_url: str, company_website: str = ""
+) -> list:
+    """Ordered unique domain candidates to try for contact-page scraping."""
     seen = set()
     ordered = []
 
@@ -379,6 +508,8 @@ def collect_domain_candidates(company: str, job_url: str) -> list:
 
     for d in domain_hints_from_job_url(job_url):
         add(d)
+
+    add(domain_from_website_field(company_website))
 
     add(find_company_domain_ddg_api(company))
     add(find_company_domain_ddg_html(company))
@@ -420,15 +551,69 @@ def guess_hr_emails(domain: str) -> list:
 
 # ─── Main entry ────────────────────────────────────────────────────────────────
 
+def find_hr_email_for_company(
+    company: str,
+    job_url: str = "",
+    company_website: str = "",
+    *,
+    allow_guesses: bool = True,
+) -> dict:
+    """
+    Resolve one HR/contact email for a company (contact pages, then optional guess).
+    Returns dict with hr_email, hr_email_verified, domain, contact_source_url, etc.
+    """
+    company = (company or "").strip()
+    result: dict = {}
+    candidates = collect_domain_candidates(company, job_url, company_website)
+
+    chosen_domain = ""
+    for dom in candidates:
+        chosen_domain = dom
+        if getattr(config, "CONTACT_PAGE_SCRAPE_ENABLED", True):
+            result = scrape_contact_page_emails(dom)
+            if result.get("hr_email"):
+                result["domain"] = dom
+                break
+
+    if not result.get("hr_email") and chosen_domain:
+        result["domain"] = chosen_domain
+
+    if not result.get("hr_email"):
+        for dom in candidates:
+            if getattr(config, "CONTACT_PAGE_SCRAPE_ENABLED", True):
+                result = scrape_contact_page_emails(dom)
+                if result.get("hr_email"):
+                    result["domain"] = dom
+                    break
+
+    if not result.get("hr_email") and allow_guesses:
+        for dom in candidates:
+            if domain_blocked_for_guessing(dom):
+                continue
+            guesses = guess_hr_emails(dom)
+            if guesses:
+                result = {
+                    "hr_email": guesses[0],
+                    "hr_email_verified": False,
+                    "domain": dom,
+                    "hr_email_guesses": guesses,
+                }
+                break
+
+    if not result.get("domain") and candidates:
+        result["domain"] = candidates[0]
+    result.setdefault("domain_candidates", candidates)
+    return result
+
+
 def find_hr_emails(jobs: list) -> list:
     """
     Enriches each job dict with `hr_email` and `hr_name` fields.
     """
-    print("\n📧 Finding company domains & HR emails…")
-    if not config.HUNTER_API_KEY or "your_hunter" in config.HUNTER_API_KEY.lower():
+    print("\n📧 Finding company domains & HR emails (contact pages)…")
+    if not getattr(config, "CONTACT_PAGE_SCRAPE_ENABLED", True):
         print(
-            "  ⚠️  Set HUNTER_API_KEY in config.py for verified addresses; "
-            "without it we only use guessed mailboxes when a domain is known."
+            "  ⚠️  CONTACT_PAGE_SCRAPE_ENABLED is False — only pattern guesses will be used."
         )
 
     enriched = []
@@ -439,55 +624,19 @@ def find_hr_emails(jobs: list) -> list:
         job_url = job.get("url", "") or ""
         print(f"  [{i}/{total}] {company[:56]}", end="  ", flush=True)
 
-        result = {}
-        candidates = collect_domain_candidates(company, job_url)
-        job["domain_candidates"] = candidates
-
-        chosen_domain = ""
-        for dom in candidates:
-            chosen_domain = dom
-            result = hunter_domain_search(dom, company)
-            if result.get("hr_email"):
-                job["domain"] = dom
-                break
-
-        if not result.get("hr_email") and chosen_domain:
-            job["domain"] = chosen_domain
-            result = _hunter_role_fallback(chosen_domain) or result
-
-        if not result.get("hr_email"):
-            for dom in candidates:
-                job["domain"] = dom
-                result = _hunter_role_fallback(dom)
-                if result.get("hr_email"):
-                    break
-
-        if not result.get("hr_email"):
-            for dom in candidates:
-                if domain_blocked_for_guessing(dom):
-                    continue
-                guesses = guess_hr_emails(dom)
-                if guesses:
-                    job["domain"] = dom
-                    job["hr_email_guesses"] = guesses
-                    result["hr_email"] = guesses[0]
-                    result["hr_email_verified"] = False
-                    break
+        result = find_hr_email_for_company(company, job_url)
+        job["domain_candidates"] = result.get("domain_candidates") or []
+        if result.get("domain"):
+            job["domain"] = result["domain"]
 
         if result.get("hr_email"):
             note = ""
-            if (
-                result.get("hr_email_verified") is False
-                and getattr(config, "HUNTER_VERIFY_GUESSED_EMAILS", True)
-            ):
-                vr = hunter_verify_email_address(result["hr_email"])
-                if vr.get("verified"):
-                    result["hr_email_verified"] = True
-                    note = "  [Hunter verifier: OK]"
-                else:
-                    st = vr.get("status") or "not deliverable"
-                    note = f"  [Hunter verifier: {st}]"
-                time.sleep(0.2)
+            if result.get("hr_email_verified"):
+                src = result.get("contact_source_url") or ""
+                if src:
+                    note = "  [contact page]"
+            else:
+                note = "  [guessed — not on contact page]"
             job.update(result)
             print(f"→ {result.get('hr_email', '?')}{note}")
         else:
@@ -499,7 +648,11 @@ def find_hr_emails(jobs: list) -> list:
         time.sleep(0.25)
 
     found = sum(1 for j in enriched if j.get("hr_email"))
-    print(f"\n  ✅ Resolved at least one address for {found}/{total} listing(s)")
+    verified = sum(1 for j in enriched if j.get("hr_email") and j.get("hr_email_verified"))
+    print(
+        f"\n  ✅ Resolved at least one address for {found}/{total} listing(s) "
+        f"({verified} from contact pages)"
+    )
     return enriched
 
 

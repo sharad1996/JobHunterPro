@@ -9,7 +9,7 @@ import config
 
 
 def _verified_to_int(v):
-    """SQLite hr_email_verified: 1 Hunter/manual, 0 guessed, NULL unknown (legacy)."""
+    """SQLite hr_email_verified: 1 contact-page/manual, 0 guessed, NULL unknown (legacy)."""
     if v is True or v == 1:
         return 1
     if v is False or v == 0:
@@ -262,6 +262,93 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_job_by_id(self, job_id: int):
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def id_by_normalized_job_url(self, normalized_url: str) -> int:
+        """Return jobs.id whose job_url normalizes to normalized_url, else None."""
+        if not normalized_url:
+            return None
+        import job_tracking
+
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, job_url FROM jobs WHERE job_url IS NOT NULL AND length(trim(job_url)) > 0"
+            ).fetchall()
+        for r in rows:
+            if job_tracking.normalize_job_url(r["job_url"] or "") == normalized_url:
+                return r["id"]
+        return None
+
+    def upsert_from_sheet_row(self, row: dict) -> str:
+        """
+        Insert or update a job from an Excel row (matched by normalized Job URL).
+        row keys: job_url, company, job_title, platform, search_country, company_domain,
+                  hr_email, application_sent, followup_sent.
+        Returns 'inserted' | 'updated'.
+        """
+        import job_tracking
+
+        nu = job_tracking.normalize_job_url(row.get("job_url") or "")
+        if not nu:
+            return "skipped"
+
+        job_payload = {
+            "company": row.get("company") or "",
+            "domain": row.get("company_domain") or "",
+            "platform": row.get("platform") or "",
+            "url": row.get("job_url") or "",
+            "hr_name": "",
+            "hr_email": row.get("hr_email") or "",
+            "search_country": row.get("search_country") or "",
+            "hr_email_verified": bool((row.get("hr_email") or "").strip()),
+        }
+
+        job_id = self.id_by_normalized_job_url(nu)
+        if job_id is None:
+            job_id = self.add_job(job_payload, row.get("job_title") or "")
+            action = "inserted"
+        else:
+            existing = self.get_job_by_id(job_id)
+            if existing and existing.get("email_status") == "pending":
+                with self._get_conn() as conn:
+                    conn.execute(
+                        """UPDATE jobs SET company=?, company_domain=?, platform=?, job_url=?,
+                           hr_email=?, search_country=?, hr_email_verified=?, job_title=?
+                           WHERE id=?""",
+                        (
+                            job_payload["company"],
+                            job_payload["domain"],
+                            job_payload["platform"],
+                            job_payload["url"],
+                            job_payload["hr_email"],
+                            job_payload["search_country"],
+                            _verified_to_int(job_payload["hr_email_verified"]),
+                            row.get("job_title") or existing.get("job_title") or "",
+                            job_id,
+                        ),
+                    )
+            elif job_payload["hr_email"]:
+                self.update_hr_email(
+                    job_id,
+                    job_payload["hr_email"],
+                    verified=bool(job_payload["hr_email_verified"]),
+                )
+            action = "updated"
+
+        if row.get("application_sent"):
+            existing = self.get_job_by_id(job_id)
+            if existing and existing.get("email_status") != "sent":
+                self.update_email_status(job_id, "sent")
+        if row.get("followup_sent"):
+            existing = self.get_job_by_id(job_id)
+            if existing and not existing.get("follow_up_sent"):
+                self.mark_followup_sent(job_id)
+
+        return action
+
     def get_stats(self) -> dict:
         with self._get_conn() as conn:
             total       = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -291,3 +378,83 @@ class Database:
                 "INSERT INTO email_log (job_id, email_type, recipient, sent_at, status) VALUES (?,?,?,?,?)",
                 (job_id, email_type, recipient, datetime.now().isoformat(), status)
             )
+
+    # ─── Cleanup ───────────────────────────────────────────────────────────────
+
+    def count_jobs(self, *, pending_only: bool = False) -> int:
+        with self._get_conn() as conn:
+            if pending_only:
+                return conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE email_status = 'pending'"
+                ).fetchone()[0]
+            return conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    def delete_jobs(
+        self,
+        *,
+        all_rows: bool = False,
+        pending_only: bool = False,
+        older_than_days: int = None,
+        job_title: str = None,
+    ) -> dict:
+        """
+        Delete job rows (and related email_log rows). Specify exactly one scope via flags.
+        Returns {"jobs_deleted": int, "log_deleted": int}.
+        """
+        scopes = sum(
+            bool(x)
+            for x in (all_rows, pending_only, older_than_days is not None, job_title)
+        )
+        if scopes != 1:
+            raise ValueError(
+                "Specify one scope: all_rows, pending_only, older_than_days, or job_title"
+            )
+
+        with self._get_conn() as conn:
+            if all_rows:
+                job_ids = [
+                    r[0]
+                    for r in conn.execute("SELECT id FROM jobs").fetchall()
+                ]
+            elif pending_only:
+                job_ids = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT id FROM jobs WHERE email_status = 'pending'"
+                    ).fetchall()
+                ]
+            elif older_than_days is not None:
+                cutoff = (
+                    datetime.now() - timedelta(days=int(older_than_days))
+                ).isoformat()
+                job_ids = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT id FROM jobs WHERE created_at < ?",
+                        (cutoff,),
+                    ).fetchall()
+                ]
+            else:
+                job_ids = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT id FROM jobs WHERE job_title = ?",
+                        (job_title,),
+                    ).fetchall()
+                ]
+
+            log_deleted = 0
+            if job_ids:
+                placeholders = ",".join("?" * len(job_ids))
+                log_deleted = conn.execute(
+                    f"DELETE FROM email_log WHERE job_id IN ({placeholders})",
+                    job_ids,
+                ).rowcount
+                jobs_deleted = conn.execute(
+                    f"DELETE FROM jobs WHERE id IN ({placeholders})",
+                    job_ids,
+                ).rowcount
+            else:
+                jobs_deleted = 0
+
+        return {"jobs_deleted": jobs_deleted, "log_deleted": log_deleted}

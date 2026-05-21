@@ -7,6 +7,8 @@ Secrets: use environment variables (never commit tokens to config.py).
   Freelancer.com search uses the public projects API (no key for basic read).
 """
 
+import compat  # noqa: F401 — before requests/urllib3
+
 import os
 import json
 import random

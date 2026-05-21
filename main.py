@@ -14,6 +14,8 @@ Usage:
   python3 main.py --send-pending           → Send pending apps (no new search)
 """
 
+import compat  # noqa: F401 — suppress urllib3/LibreSSL warning before other imports
+
 import argparse
 import sys
 import os
@@ -138,7 +140,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
         f"{len(jobs_enriched) - new_count - updated_count} unchanged (already sent or duplicate sent row){RESET}"
     )
     print(
-        f"{CYAN}📎 HR emails refreshed in {xlsx_path} for jobs Hunter resolved. "
+        f"{CYAN}📎 HR emails refreshed in {xlsx_path} for jobs found on contact pages. "
         f"For the rest, add an address in the HR email column then "
         f"`python3 main.py --sync-from-xlsx`.{RESET}"
     )
@@ -153,8 +155,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     )
     if guessed:
         print(
-            f"\n{YELLOW}⚠️  {guessed} address(es) are still unverified after Hunter’s automatic check "
-            f"(verifier said undeliverable / risky, or API quota). "
+            f"\n{YELLOW}⚠️  {guessed} address(es) are pattern guesses (not found on a contact page). "
             f"They are not auto-sent while SEND_ONLY_VERIFIED_EMAILS is True — use --add-email if you know the address.{RESET}"
         )
 
@@ -169,7 +170,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     if has_email == 0:
         xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
         print(
-            f"{RED}\nNo HR emails found via Hunter/guessing. "
+            f"{RED}\nNo HR emails found via contact pages or guessing. "
             f"Use job URLs in {draft_path} to find contacts.{RESET}"
         )
         print(
@@ -194,7 +195,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
             print(
                 f"{YELLOW}\nNo sendable pending rows: {len(raw_pending)} in the database for this title, "
                 f"but all were filtered (unverified guesses, tracking sheet, or invalid email). "
-                f"Use Hunter/--add-email or set SEND_ONLY_VERIFIED_EMAILS = False in config.py.{RESET}"
+                f"Add HR emails in the sheet/--add-email or set SEND_ONLY_VERIFIED_EMAILS = False in config.py.{RESET}"
             )
             print(
                 f"{GREEN}Rows stay in {xlsx_path}. Add or fix HR email there, then:{RESET} "
@@ -232,26 +233,147 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     print(f"{CYAN}   Tracking sheet: {getattr(config, 'JOB_TRACKING_XLSX', 'job_tracking.xlsx')}{RESET}")
 
 
-def cmd_sync_from_xlsx():
-    """Push HR email column from job_tracking.xlsx into SQLite pending rows (by Job URL)."""
+def cmd_fill_hr_emails(force: bool = False, limit: int = None, dry_run: bool = False):
+    """Scrape contact pages for companies in job_tracking.xlsx and fill HR email column."""
+    import config
+    import job_tracking
+
+    path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+    try:
+        stats = job_tracking.enrich_hr_emails_in_xlsx(
+            path,
+            only_missing=not force,
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        print(f"\n{RED}Fill HR emails failed: {e}{RESET}")
+        return
+
+    if stats["processed"] == 0:
+        print(
+            f"\n{YELLOW}No rows to process in {path} "
+            f"(all have HR email, or no Company name). Use --force to refresh existing emails.{RESET}"
+        )
+        return
+
+    if dry_run:
+        print(f"\n{YELLOW}Dry run — no changes written to {path}.{RESET}")
+
+    print(
+        f"\n{GREEN}✅ Sheet update complete.{RESET} "
+        f"Processed {stats['processed']} row(s), filled {stats['filled']} "
+        f"({stats['verified']} from contact pages, {stats['guessed']} guessed)."
+    )
+    if stats["not_found"]:
+        print(
+            f"{YELLOW}  {stats['not_found']} row(s) still have no HR email "
+            f"(no contact page match; guesses disabled unless FILL_XLSX_INCLUDE_GUESSES).{RESET}"
+        )
+    if stats.get("skipped_has_email") and not force:
+        print(
+            f"{CYAN}  {stats['skipped_has_email']} row(s) already had HR email (use --force to re-fetch).{RESET}"
+        )
+    if stats["filled"] and not dry_run:
+        print(
+            f"\n{CYAN}Next: python3 main.py --sync-from-xlsx  "
+            f"then  python3 main.py --send-pending [--job \"Your Title\"]{RESET}"
+        )
+
+
+def cmd_clear_db(
+    *,
+    all_rows: bool = False,
+    pending_only: bool = False,
+    older_than_days: int = None,
+    job_title: str = None,
+    yes: bool = False,
+):
+    """Remove job rows from SQLite (and related email_log entries)."""
+    from database import Database
+
+    db = Database()
+    before = db.get_stats()
+
+    if all_rows:
+        scope = "ALL jobs and email log entries"
+        n = before["total"]
+    elif pending_only:
+        scope = "pending jobs only (keeps sent / follow-up history)"
+        n = db.count_jobs(pending_only=True)
+    elif older_than_days is not None:
+        scope = f"jobs older than {older_than_days} day(s)"
+        n = None
+    elif job_title:
+        scope = f'jobs with job_title "{job_title}"'
+        n = None
+    else:
+        print(
+            f"{RED}Specify what to delete: --all, --pending, --older-than N, or --job \"Title\"{RESET}"
+        )
+        return
+
+    print(f"\n{YELLOW}Will delete {scope} from {db.db_path}.{RESET}")
+    print(
+        f"  Current DB: {before['total']} job(s), "
+        f"{before['applied']} sent, {before['no_email']} pending without email."
+    )
+    if n is not None:
+        print(f"  Rows to remove: ~{n}")
+
+    if not yes:
+        confirm = input(f"\n{BOLD}Type 'yes' to confirm deletion: {RESET}").strip().lower()
+        if confirm != "yes":
+            print(f"{YELLOW}Cancelled — no rows deleted.{RESET}")
+            return
+
+    try:
+        result = db.delete_jobs(
+            all_rows=all_rows,
+            pending_only=pending_only,
+            older_than_days=older_than_days,
+            job_title=job_title,
+        )
+    except ValueError as e:
+        print(f"{RED}{e}{RESET}")
+        return
+
+    after = db.get_stats()
+    print(
+        f"\n{GREEN}✅ Deleted {result['jobs_deleted']} job row(s) and "
+        f"{result['log_deleted']} email log row(s).{RESET}"
+    )
+    print(f"  Remaining in DB: {after['total']} job(s).")
+
+
+def cmd_sync_xlsx():
+    """Two-way sync: job_tracking.xlsx ↔ SQLite (matched by Job URL)."""
     import config
     import job_tracking
     from database import Database
 
     db = Database()
     path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+    before = db.get_stats()
     try:
-        updated, skipped = job_tracking.import_hr_from_xlsx_to_db(db, path)
+        stats = job_tracking.sync_with_database(db, path)
     except Exception as e:
         print(f"\n{RED}Sync failed: {e}{RESET}")
         return
-    print(f"\n{GREEN}✅ Updated {updated} database row(s) from {path}.{RESET}")
-    if skipped:
-        print(
-            f"{YELLOW}  {skipped} sheet row(s) had HR email but no matching pending job URL in the database "
-            f"(wrong URL, already sent, or add the job via a search first).{RESET}"
-        )
+    after = db.get_stats()
+    print(f"\n{GREEN}✅ Synced {path} with {db.db_path}{RESET}")
+    print(
+        f"  Sheet: {stats['sheet_rows']} row(s) — "
+        f"DB +{stats['db_inserted']} inserted, {stats['db_updated']} updated"
+    )
+    print(f"  Sheet: {stats['xlsx_updated']} row(s) merged from DB, {stats['xlsx_appended']} appended")
+    print(f"  Database: {before['total']} → {after['total']} job(s)")
     print(f"{CYAN}Then run: python3 main.py --send-pending [--job \"Your Title\"]{RESET}")
+
+
+def cmd_sync_from_xlsx():
+    """Alias for full two-way sync (same as --sync-xlsx)."""
+    cmd_sync_xlsx()
 
 
 def cmd_export_xlsx():
@@ -514,9 +636,11 @@ def interactive_menu():
   {CYAN}6.{RESET} 📤  Export job tracking Excel from database
   {CYAN}7.{RESET} 📨  Send pending application emails (no new search)
   {CYAN}8.{RESET} 🔄  Sync HR emails from Excel into database (by Job URL)
-  {CYAN}9.{RESET} 🚪  Exit
+  {CYAN}9.{RESET} 📧  Fill HR emails in Excel from company contact pages
+  {CYAN}10.{RESET} 🗑️   Clear old records from database
+  {CYAN}11.{RESET} 🚪  Exit
 """)
-        choice = input("Enter choice (1-9): ").strip()
+        choice = input("Enter choice (1-11): ").strip()
 
         if choice == "1":
             job_title = input("\n💼 Enter job title or technology (e.g. 'Python Developer', 'React', 'Data Analyst'): ").strip()
@@ -538,12 +662,28 @@ def interactive_menu():
             ).strip() or None
             cmd_send_pending(job_title=jt, dry_run=False)
         elif choice == "8":
-            cmd_sync_from_xlsx()
+            cmd_sync_xlsx()
         elif choice == "9":
+            cmd_fill_hr_emails()
+        elif choice == "10":
+            print(f"\n{YELLOW}Delete: 1=all  2=pending only  3=older than N days{RESET}")
+            sub = input("Choice (1/2/3): ").strip()
+            if sub == "1":
+                cmd_clear_db(all_rows=True, yes=False)
+            elif sub == "2":
+                cmd_clear_db(pending_only=True, yes=False)
+            elif sub == "3":
+                try:
+                    days = int(input("Older than how many days? ").strip())
+                except ValueError:
+                    print(f"{RED}Invalid number.{RESET}")
+                else:
+                    cmd_clear_db(older_than_days=days, yes=False)
+        elif choice == "11":
             print(f"\n{GREEN}Good luck with your job search! 🚀{RESET}\n")
             sys.exit(0)
         else:
-            print(f"{RED}Invalid choice. Please enter 1-9.{RESET}")
+            print(f"{RED}Invalid choice. Please enter 1-11.{RESET}")
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
@@ -568,7 +708,14 @@ Examples:
   python3 main.py --auth-indeed
   python3 main.py --auth-wellfound
   python3 main.py --auth-upwork
+  python3 main.py --sync-xlsx
   python3 main.py --sync-from-xlsx
+  python3 main.py --fill-hr-emails
+  python3 main.py --fill-hr-emails --limit 20
+  python3 main.py --fill-hr-emails --force
+  python3 main.py --clear-db --all --yes
+  python3 main.py --clear-db --pending --yes
+  python3 main.py --clear-db --older-than 30 --yes
         """
     )
     parser.add_argument("--auth-indeed", action="store_true", help="Save Indeed login session for Playwright (headed browser)")
@@ -586,11 +733,58 @@ Examples:
     parser.add_argument("--add-email",action="store_true", help="Manually add HR emails")
     parser.add_argument("--export-xlsx", action="store_true", help="Export SQLite jobs to Excel tracking sheet")
     parser.add_argument(
+        "--sync-xlsx",
+        action="store_true",
+        help="Two-way sync job_tracking.xlsx with SQLite (by Job URL)",
+    )
+    parser.add_argument(
         "--sync-from-xlsx",
         action="store_true",
-        help="Copy HR email cells from job_tracking.xlsx into pending SQLite rows (match by Job URL)",
+        help="Alias for --sync-xlsx (sheet ↔ database)",
+    )
+    parser.add_argument(
+        "--fill-hr-emails",
+        action="store_true",
+        help="Scrape company contact pages and fill empty HR email cells in job_tracking.xlsx",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --fill-hr-emails: re-fetch even when HR email column is already filled",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="With --fill-hr-emails: process at most N rows (empty HR email only unless --force)",
     )
     parser.add_argument("--dry-run",  action="store_true", help="Simulate without actually sending emails")
+    parser.add_argument(
+        "--clear-db",
+        action="store_true",
+        help="Delete job rows from SQLite (use with --all, --pending, or --older-than)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="With --clear-db: delete every job and email log row",
+    )
+    parser.add_argument(
+        "--pending",
+        action="store_true",
+        help="With --clear-db: delete only pending (unsent) jobs",
+    )
+    parser.add_argument(
+        "--older-than",
+        type=int,
+        metavar="DAYS",
+        help="With --clear-db: delete jobs created more than N days ago",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt (required for non-interactive --clear-db)",
+    )
     args = parser.parse_args()
 
     # Config check (skip for status/list since those don't send emails)
@@ -604,8 +798,18 @@ Examples:
         cmd_auth_wellfound()
     elif args.auth_upwork:
         cmd_auth_upwork()
-    elif args.sync_from_xlsx:
-        cmd_sync_from_xlsx()
+    elif args.clear_db:
+        cmd_clear_db(
+            all_rows=args.all,
+            pending_only=args.pending,
+            older_than_days=args.older_than,
+            job_title=args.job,
+            yes=args.yes,
+        )
+    elif args.fill_hr_emails:
+        cmd_fill_hr_emails(force=args.force, limit=args.limit, dry_run=args.dry_run)
+    elif args.sync_xlsx or args.sync_from_xlsx:
+        cmd_sync_xlsx()
     elif args.export_xlsx:
         cmd_export_xlsx()
     elif args.send_pending:

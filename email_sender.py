@@ -16,7 +16,7 @@ from email_finder import looks_valid_email
 
 
 def _db_row_verified_for_send(job: dict) -> bool:
-    """Hunter/manual (1); guessed (0); legacy NULL treated as unverified when strict."""
+    """Contact page or manual (1); guessed (0); legacy NULL treated as unverified when strict."""
     v = job.get("hr_email_verified")
     return v is True or v == 1
 
@@ -153,8 +153,8 @@ def send_applications(db: Database, job_title: str, dry_run: bool = False) -> in
         print(f"\n  ⏭️  Skipped {meta['invalid_syntax']} row(s): invalid email format in database.")
     if meta["unverified_skipped"]:
         print(
-            f"\n  ⏭️  Skipped {meta['unverified_skipped']} row(s): not verified (Hunter verifier failed / disabled, "
-            f"or no Hunter key). Set SEND_ONLY_VERIFIED_EMAILS = False to send without checks (risky)."
+            f"\n  ⏭️  Skipped {meta['unverified_skipped']} row(s): not verified (not from a contact page). "
+            f"Set SEND_ONLY_VERIFIED_EMAILS = False to send guessed addresses (risky)."
         )
 
     if not pending:

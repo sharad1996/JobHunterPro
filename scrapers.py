@@ -4,6 +4,8 @@ Each scraper returns a list of dicts:
   { company, title, url, platform, domain, search_country? }
 """
 
+import compat  # noqa: F401 — before requests/urllib3
+
 import os
 import time
 import random

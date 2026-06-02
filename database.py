@@ -313,6 +313,8 @@ class Database:
         else:
             existing = self.get_job_by_id(job_id)
             if existing and existing.get("email_status") == "pending":
+                sheet_title = (row.get("job_title") or "").strip()
+                keep_title = (existing.get("job_title") or "").strip() or sheet_title
                 with self._get_conn() as conn:
                     conn.execute(
                         """UPDATE jobs SET company=?, company_domain=?, platform=?, job_url=?,
@@ -326,7 +328,7 @@ class Database:
                             job_payload["hr_email"],
                             job_payload["search_country"],
                             _verified_to_int(job_payload["hr_email_verified"]),
-                            row.get("job_title") or existing.get("job_title") or "",
+                            keep_title,
                             job_id,
                         ),
                     )

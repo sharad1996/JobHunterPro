@@ -61,6 +61,221 @@ def check_config():
 
 # ─── Search & Apply ────────────────────────────────────────────────────────────
 
+def _load_skip_urls(db, job_tracking):
+    """URLs already emailed / applied (Excel + database) — never apply twice."""
+    skip = job_tracking.load_skip_url_set()
+    for raw in db.get_sent_job_urls():
+        nu = job_tracking.normalize_job_url(raw)
+        if nu:
+            skip.add(nu)
+    return skip
+
+
+def _job_ready_for_batch(job: dict, *, require_verified: bool) -> bool:
+    import config
+    from email_finder import looks_valid_email
+
+    em = (job.get("hr_email") or "").strip()
+    if not em or not looks_valid_email(em):
+        return False
+    if require_verified and getattr(config, "SEND_ONLY_VERIFIED_EMAILS", True):
+        v = job.get("hr_email_verified")
+        if not (v is True or v == 1):
+            return False
+    return True
+
+
+def _select_jobs_for_batch(jobs: list, skip_urls: set, limit: int) -> list:
+    """Find verified HR emails until `limit` new jobs are ready (stops early)."""
+    import time
+
+    import config
+    from email_finder import find_hr_email_for_company
+    import job_tracking
+
+    require_verified = getattr(config, "BATCH_REQUIRE_VERIFIED_EMAIL", True)
+    if not getattr(config, "SEND_ONLY_VERIFIED_EMAILS", True):
+        require_verified = False
+
+    selected = []
+    scanned = 0
+    for job in jobs:
+        if len(selected) >= limit:
+            break
+        url = job.get("url") or ""
+        nu = job_tracking.normalize_job_url(url)
+        if nu and nu in skip_urls:
+            continue
+        scanned += 1
+        company = job.get("company", "") or ""
+        print(f"  [{len(selected) + 1}/{limit} target] {company[:52]}", end="  ", flush=True)
+        result = find_hr_email_for_company(
+            company,
+            url,
+            job.get("company_website") or job.get("domain") or "",
+            allow_guesses=not require_verified,
+        )
+        job.update(result)
+        if result.get("domain"):
+            job["domain"] = result["domain"]
+        if _job_ready_for_batch(job, require_verified=require_verified):
+            selected.append(job)
+            tag = "contact page" if job.get("hr_email_verified") else "email"
+            print(f"→ {job['hr_email']}  [{tag}]")
+            if nu:
+                skip_urls.add(nu)
+        else:
+            em = job.get("hr_email") or ""
+            print(f"→ skip ({em or 'no email'})")
+        time.sleep(0.2)
+
+    print(f"\n  Scanned {scanned} new listing(s), selected {len(selected)} with sendable email.")
+    return selected
+
+
+def _print_batch_send_blockers(saved: int, eligible: int, send_meta: dict):
+    """Explain why batch rows were saved but not emailed."""
+    import config
+
+    blocked = saved - eligible
+    if blocked <= 0:
+        return
+    reasons = []
+    if send_meta.get("sheet_skipped"):
+        reasons.append(
+            f"{send_meta['sheet_skipped']} blocked on {getattr(config, 'JOB_TRACKING_XLSX', 'job_tracking.xlsx')} "
+            f"(Application email sent / isEmailed already marked)"
+        )
+    if send_meta.get("unverified_skipped"):
+        reasons.append(
+            f"{send_meta['unverified_skipped']} HR email not verified "
+            f"(set SEND_ONLY_VERIFIED_EMAILS = False to send guesses — risky)"
+        )
+    if send_meta.get("invalid_syntax"):
+        reasons.append(f"{send_meta['invalid_syntax']} invalid email address in database")
+    if not reasons:
+        reasons.append(
+            f"{blocked} row(s) are not pending send in the database "
+            f"(often already marked sent for the same company, or sync changed the row)"
+        )
+    print(f"  Why {blocked} were skipped:")
+    for line in reasons:
+        print(f"    • {line}")
+
+
+def cmd_run_batch(job_title: str, dry_run: bool = False, limit: int = None):
+    """
+    One command: search → up to N new jobs with verified email → xlsx → DB → send → mark applied.
+    Skips jobs already in the tracking sheet or database as sent/applied (by Job URL).
+    """
+    import config
+    import job_tracking
+    from job_filters import filter_job_list
+    from scrapers import search_all_platforms
+    from email_sender import send_applications, application_send_candidates
+    from database import Database
+
+    limit = limit or int(getattr(config, "BATCH_JOB_LIMIT", 25))
+    db = Database()
+    xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+
+    print(
+        f"\n{BOLD}🚀 Batch run: up to {limit} new application(s) for \"{job_title}\"{RESET}\n"
+        f"  (skips URLs already marked applied/emailed in {xlsx_path} or DB)\n"
+    )
+
+    if getattr(config, "REMOTE_ONLY", False):
+        cc = ", ".join(getattr(config, "TARGET_COUNTRIES", []) or [])
+        print(f"{CYAN}Remote search — regions: {cc}{RESET}\n")
+    else:
+        print(f"{CYAN}Location: {getattr(config, 'JOB_LOCATION', '')}{RESET}\n")
+
+    jobs = search_all_platforms(job_title)
+    if not jobs:
+        print(f"{RED}No jobs found.{RESET}")
+        return
+
+    print(f"{GREEN}✅ {len(jobs)} raw listing(s) from boards{RESET}")
+
+    try:
+        job_tracking.ensure_workbook()
+        skip_urls = _load_skip_urls(db, job_tracking)
+        jobs, n_skip = job_tracking.filter_jobs_not_skipped(jobs, skip_urls)
+        if n_skip:
+            print(f"  ⏭️  {n_skip} already applied/emailed (won't apply again)")
+    except Exception as e:
+        print(f"{YELLOW}⚠️  Excel skip list unavailable: {e}{RESET}")
+        skip_urls = _load_skip_urls(db, job_tracking)
+
+    jobs = filter_job_list(jobs)
+    if not jobs:
+        print(f"{RED}No new jobs after filters.{RESET}")
+        return
+
+    print(f"\n📧 Finding contact-page emails (target {limit} jobs)…")
+    selected = _select_jobs_for_batch(jobs, skip_urls, limit)
+    if not selected:
+        print(
+            f"{RED}\nNo sendable emails found in this batch. "
+            f"Try another title or set BATCH_REQUIRE_VERIFIED_EMAIL = False in config.py.{RESET}"
+        )
+        return
+
+    print(f"\n{GREEN}✅ {len(selected)} job(s) ready — writing sheet & database…{RESET}")
+    try:
+        job_tracking.bulk_upsert_initial(selected, job_title)
+    except Exception as e:
+        print(f"{YELLOW}⚠️  Sheet bulk write: {e}{RESET}")
+
+    batch_ids = []
+    for job in selected:
+        jid, action = db.upsert_job_enrichment(job, job_title)
+        batch_ids.append(jid)
+        try:
+            job_tracking.upsert_row(job, job_title, hr_email=job.get("hr_email") or "")
+        except Exception:
+            pass
+
+    try:
+        job_tracking.sync_with_database(db, xlsx_path)
+    except Exception as e:
+        print(f"{YELLOW}⚠️  Sheet sync: {e}{RESET}")
+
+    print_results_table(selected)
+
+    if dry_run:
+        eligible, send_meta = application_send_candidates(db, None, job_ids=batch_ids)
+        print(
+            f"\n{YELLOW}[DRY RUN] Would send {len(eligible)} of {len(batch_ids)} "
+            f"saved job(s); no messages sent.{RESET}"
+        )
+        if len(eligible) < len(batch_ids):
+            _print_batch_send_blockers(len(batch_ids), len(eligible), send_meta)
+        return
+
+    eligible, send_meta = application_send_candidates(db, None, job_ids=batch_ids)
+    if not eligible:
+        print(f"\n{YELLOW}⚠️  Saved {len(batch_ids)} job(s) to the sheet and database, but none could be emailed.{RESET}")
+        _print_batch_send_blockers(len(batch_ids), 0, send_meta)
+        print(
+            f"\n{CYAN}📒 {xlsx_path} was updated with job listings and HR emails (not marked as sent).{RESET}"
+        )
+        return
+
+    if len(eligible) < len(batch_ids):
+        print(
+            f"\n{YELLOW}Note: {len(eligible)} of {len(batch_ids)} saved job(s) pass send filters "
+            f"(the rest are already sent, blocked on the sheet, or unverified).{RESET}"
+        )
+
+    print(f"\n📨 Sending {len(eligible)} application email(s) (no prompt)…")
+    sent = send_applications(db, job_title=None, dry_run=False, job_ids=batch_ids)
+    print(f"\n{GREEN}✅ Batch complete: {sent} email(s) sent.{RESET}")
+    if sent:
+        print(f"{CYAN}📒 {xlsx_path} updated (Application email sent / isEmailed).{RESET}")
+    print(f"{CYAN}📅 Follow-ups due in {config.FOLLOW_UP_DAYS} days — run: python3 main.py --followup{RESET}")
+
+
 def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     import config
     import job_tracking
@@ -72,14 +287,19 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
 
     db = Database()
 
+    max_age = getattr(config, "MAX_JOB_POSTING_AGE_DAYS", 10)
     if getattr(config, "REMOTE_ONLY", False):
         cc = ", ".join(getattr(config, "TARGET_COUNTRIES", []) or [])
         print(
-            f"\n{BOLD}🔍 Remote-only search for '{job_title}' — regions: {cc}{RESET}\n"
+            f"\n{BOLD}🔍 Remote-only search for '{job_title}' — regions: {cc} "
+            f"(posted within last {max_age} days){RESET}\n"
         )
     else:
         loc = getattr(config, "JOB_LOCATION", "")
-        print(f"\n{BOLD}🔍 Searching for '{job_title}' (location: {loc})...{RESET}\n")
+        print(
+            f"\n{BOLD}🔍 Searching for '{job_title}' (location: {loc}, "
+            f"posted within last {max_age} days)...{RESET}\n"
+        )
 
     jobs = search_all_platforms(job_title)
 
@@ -91,11 +311,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
 
     try:
         job_tracking.ensure_workbook()
-        skip_urls = job_tracking.load_skip_url_set()
-        for raw in db.get_sent_job_urls():
-            nu = job_tracking.normalize_job_url(raw)
-            if nu:
-                skip_urls.add(nu)
+        skip_urls = _load_skip_urls(db, job_tracking)
         jobs, _skipped_tr = job_tracking.filter_jobs_not_skipped(jobs, skip_urls)
     except Exception as e:
         print(f"{YELLOW}⚠️  Excel tracking unavailable ({e}). Install: pip install openpyxl{RESET}")
@@ -628,7 +844,7 @@ def interactive_menu():
         print(f"""
 {BOLD}What would you like to do?{RESET}
 
-  {CYAN}1.{RESET} 🔍  Search jobs & send application emails
+  {CYAN}1.{RESET} 🚀  Batch run (search → 25 jobs → email → send → update sheet)
   {CYAN}2.{RESET} 📬  Send pending follow-up emails
   {CYAN}3.{RESET} 📊  View application dashboard
   {CYAN}4.{RESET} 📋  List all tracked applications
@@ -645,7 +861,7 @@ def interactive_menu():
         if choice == "1":
             job_title = input("\n💼 Enter job title or technology (e.g. 'Python Developer', 'React', 'Data Analyst'): ").strip()
             if job_title:
-                cmd_search_and_apply(job_title)
+                cmd_run_batch(job_title)
         elif choice == "2":
             cmd_followup()
         elif choice == "3":
@@ -697,6 +913,8 @@ def main():
         epilog="""
 Examples:
   python3 main.py
+  python3 main.py --run --job "Python Developer"
+  python3 main.py --run --job "React Developer" --limit 10
   python3 main.py --job "Python Developer"
   python3 main.py --followup
   python3 main.py --status
@@ -721,7 +939,12 @@ Examples:
     parser.add_argument("--auth-indeed", action="store_true", help="Save Indeed login session for Playwright (headed browser)")
     parser.add_argument("--auth-wellfound", action="store_true", help="Save Wellfound login session for Playwright")
     parser.add_argument("--auth-upwork", action="store_true", help="Save Upwork login session (reserved for browser fetch)")
-    parser.add_argument("--job",      type=str, help="Job title or technology to search")
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="One-shot batch: search, find emails for up to N jobs (default 25), sync sheet+DB, send, mark applied",
+    )
+    parser.add_argument("--job",      type=str, help="Job title or technology to search (required with --run)")
     parser.add_argument(
         "--send-pending",
         action="store_true",
@@ -788,7 +1011,7 @@ Examples:
     args = parser.parse_args()
 
     # Config check (skip for status/list since those don't send emails)
-    if args.job or args.followup or args.send_pending:
+    if args.run or args.job or args.followup or args.send_pending:
         if not check_config():
             sys.exit(1)
 
@@ -814,6 +1037,11 @@ Examples:
         cmd_export_xlsx()
     elif args.send_pending:
         cmd_send_pending(job_title=args.job, dry_run=args.dry_run)
+    elif args.run:
+        if not args.job:
+            print(f"{RED}--run requires --job \"Your Job Title\"{RESET}")
+            sys.exit(1)
+        cmd_run_batch(args.job, dry_run=args.dry_run, limit=args.limit)
     elif args.job:
         cmd_search_and_apply(args.job, dry_run=args.dry_run)
     elif args.followup:

@@ -16,6 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
+from job_filters import parse_posted_at, posted_at_within_window
 
 HEADERS = {
     "User-Agent": (
@@ -39,6 +40,13 @@ def _matches_keywords(text: str, tokens: list) -> bool:
         return True
     t = (text or "").lower()
     return any(tok in t for tok in tokens)
+
+
+def _within_posting_window(posted_value) -> bool:
+    dt = parse_posted_at(posted_value)
+    if dt is None:
+        return True
+    return posted_at_within_window(dt)
 
 
 def scrape_remoteok(job_title: str, max_results: int = 50) -> list:
@@ -70,6 +78,9 @@ def scrape_remoteok(job_title: str, max_results: int = 50) -> list:
             blob = f"{title} {tags} {company}"
             if not _matches_keywords(blob, tokens):
                 continue
+            posted = item.get("date") or item.get("epoch")
+            if not _within_posting_window(posted):
+                continue
             if company and url:
                 results.append(
                     {
@@ -79,6 +90,7 @@ def scrape_remoteok(job_title: str, max_results: int = 50) -> list:
                         "platform": "RemoteOK",
                         "domain": "",
                         "search_country": "Global",
+                        "posted_at": posted,
                     }
                 )
             if len(results) >= max_results:
@@ -110,6 +122,9 @@ def scrape_remotive(job_title: str, max_results: int = 50) -> list:
             company = (j.get("company_name") or "").strip()
             title = (j.get("title") or "").strip()
             url = (j.get("url") or "").strip()
+            posted = j.get("publication_date")
+            if not _within_posting_window(posted):
+                continue
             if company and url:
                 results.append(
                     {
@@ -119,6 +134,7 @@ def scrape_remotive(job_title: str, max_results: int = 50) -> list:
                         "platform": "Remotive",
                         "domain": "",
                         "search_country": "Global",
+                        "posted_at": posted,
                     }
                 )
             if len(results) >= max_results:
@@ -145,6 +161,7 @@ def scrape_weworkremotely_rss(job_title: str, max_results: int = 50) -> list:
         for item in root.findall(".//item"):
             title_el = item.findtext("title") or ""
             link_el = item.findtext("link") or ""
+            pub_date = item.findtext("pubDate") or ""
             # "Company: Role — …"
             company = "Unknown"
             title = title_el
@@ -153,6 +170,8 @@ def scrape_weworkremotely_rss(job_title: str, max_results: int = 50) -> list:
                 company = parts[0].strip()
                 title = parts[1].strip() if len(parts) > 1 else title_el
             if not _matches_keywords(title_el, tokens):
+                continue
+            if not _within_posting_window(pub_date):
                 continue
             if link_el and company:
                 results.append(
@@ -163,6 +182,7 @@ def scrape_weworkremotely_rss(job_title: str, max_results: int = 50) -> list:
                         "platform": "WeWorkRemotely",
                         "domain": "",
                         "search_country": "Global",
+                        "posted_at": pub_date,
                     }
                 )
             if len(results) >= max_results:

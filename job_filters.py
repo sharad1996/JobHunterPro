@@ -1,10 +1,67 @@
 """
-Post-search filters: block large tech, optional headcount band, dedupe by company.
+Post-search filters: block large tech, optional headcount band, posting age, dedupe by company.
 """
 
 import re
 import unicodedata
+from datetime import datetime, timedelta, timezone
+
 import config
+
+
+def max_job_posting_age_days() -> int:
+    """Days since posting — listings older than this are dropped when a date is known."""
+    try:
+        return max(1, int(getattr(config, "MAX_JOB_POSTING_AGE_DAYS", 10)))
+    except (TypeError, ValueError):
+        return 10
+
+
+def parse_posted_at(value):
+    """Parse ISO/RFC dates or epoch seconds into timezone-aware datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                dt = parsedate_to_datetime(s)
+            except (TypeError, ValueError, IndexError):
+                return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def posted_at_within_window(posted_at: datetime) -> bool:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_job_posting_age_days())
+    return posted_at >= cutoff
+
+
+def passes_posting_age(job: dict) -> bool:
+    """Drop jobs with posted_at older than MAX_JOB_POSTING_AGE_DAYS; keep if date unknown."""
+    raw = job.get("posted_at")
+    if raw is None:
+        return True
+    dt = raw if isinstance(raw, datetime) else parse_posted_at(raw)
+    if dt is None:
+        return True
+    return posted_at_within_window(dt)
 
 
 def _norm_company(name: str) -> str:
@@ -90,10 +147,11 @@ def dedupe_same_company_keep_first(jobs: list) -> list:
 
 
 def filter_job_list(jobs: list) -> list:
-    """Apply giant blocklist, headcount rules, then company dedupe."""
+    """Apply giant blocklist, headcount rules, posting age, then company dedupe."""
     filtered = []
     skipped_giant = 0
     skipped_headcount = 0
+    skipped_old = 0
     for j in jobs:
         if is_blocked_giant(j.get("company", "")):
             skipped_giant += 1
@@ -101,15 +159,22 @@ def filter_job_list(jobs: list) -> list:
         if not passes_headcount_band(j):
             skipped_headcount += 1
             continue
+        if not passes_posting_age(j):
+            skipped_old += 1
+            continue
         filtered.append(j)
 
     deduped = dedupe_same_company_keep_first(filtered)
-    if skipped_giant or skipped_headcount or len(deduped) < len(filtered):
+    if skipped_giant or skipped_headcount or skipped_old or len(deduped) < len(filtered):
         parts = []
         if skipped_giant:
             parts.append(f"{skipped_giant} giant(s)")
         if skipped_headcount:
             parts.append(f"{skipped_headcount} headcount / no-data rule")
+        if skipped_old:
+            parts.append(
+                f"{skipped_old} older than {max_job_posting_age_days()} day(s)"
+            )
         if len(deduped) < len(filtered):
             parts.append("company dedupe")
         print(f"\n  🧹 Filters: {', '.join(parts)} — {len(filtered)} → {len(deduped)} listing(s).")

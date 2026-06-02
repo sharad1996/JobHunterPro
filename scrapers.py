@@ -1,7 +1,7 @@
 """
 Job Scrapers — fetches job listings from Indeed, Naukri, Shine, LinkedIn, Glassdoor.
 Each scraper returns a list of dicts:
-  { company, title, url, platform, domain, search_country? }
+  { company, title, url, platform, domain, search_country?, posted_at? }
 """
 
 import compat  # noqa: F401 — before requests/urllib3
@@ -14,6 +14,7 @@ import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 import config
+from job_filters import max_job_posting_age_days
 
 from marketplace_boards import scrape_freelancer, scrape_upwork
 from remote_boards import (
@@ -193,6 +194,7 @@ def scrape_indeed(
             "q": q,
             "l": location,
             "sort": "date",
+            "fromage": max_job_posting_age_days(),
         }
         if remote_only:
             params["remotejob"] = "1"
@@ -240,7 +242,8 @@ def scrape_naukri(job_title: str, max_results: int = 15, remote_only: bool = Fal
     slug = _slug(kw)
     print("  → Searching Naukri (India, remote)..." if remote_only else "  → Searching Naukri...")
     try:
-        url = f"https://www.naukri.com/{slug}-jobs"
+        age = max_job_posting_age_days()
+        url = f"https://www.naukri.com/{slug}-jobs?jobAge={age}"
         resp = _get(url)
         if not resp:
             # Try search URL (often requires App Id / SystemId headers — may fail)
@@ -321,7 +324,8 @@ def scrape_shine(job_title: str, max_results: int = 15, remote_only: bool = Fals
     slug = _slug(kw)
     print("  → Searching Shine (India, remote)..." if remote_only else "  → Searching Shine...")
     try:
-        url = f"https://www.shine.com/job-search/{slug}-jobs/"
+        age = max_job_posting_age_days()
+        url = f"https://www.shine.com/job-search/{slug}-jobs/?posted={age}"
         resp = _get(url)
         if not resp:
             print("  ✗ Shine: Could not connect")
@@ -386,10 +390,11 @@ def scrape_linkedin(
     label = f"LinkedIn ({location}" + (", remote)" if remote_only else ")")
     print(f"  → Searching {label}...")
     try:
+        age_sec = max_job_posting_age_days() * 86400
         params = {
             "keywords": kw,
             "location": location,
-            "f_TPR": "r86400",   # last 24 hours
+            "f_TPR": f"r{age_sec}",
             "position": 1,
             "pageNum": 0,
         }
@@ -456,6 +461,7 @@ def scrape_glassdoor(
             "sc.keyword": kw,
             "locT": "N",
             "locId": loc_id,
+            "fromAge": max_job_posting_age_days(),
         }
         if remote_only:
             params["remoteWorkType"] = "1"

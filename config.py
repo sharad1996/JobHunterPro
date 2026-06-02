@@ -100,6 +100,14 @@ FOLLOW_UP_DAYS = 2                               # Days to wait before sending f
 # ─────────────────────────────────────────────
 MAX_RESULTS_PER_PLATFORM = 100                   # Max jobs per platform *per country* (remote mode)
 
+# Only include listings posted within this many days (7–10 is a good range; default 10).
+MAX_JOB_POSTING_AGE_DAYS = 10
+
+# One-shot batch (--run): find jobs + verified emails + sheet + DB + send for this many new listings.
+BATCH_JOB_LIMIT = 25
+# In batch mode, skip pattern-guessed emails unless SEND_ONLY_VERIFIED_EMAILS is False.
+BATCH_REQUIRE_VERIFIED_EMAIL = True
+
 # Legacy single location when REMOTE_ONLY is False (on-site / hybrid searches)
 JOB_LOCATION = "India"
 

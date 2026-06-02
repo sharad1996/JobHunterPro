@@ -21,12 +21,24 @@ def _db_row_verified_for_send(job: dict) -> bool:
     return v is True or v == 1
 
 
-def application_send_candidates(db: Database, job_title: str):
+def application_send_candidates(db: Database, job_title: str = None, job_ids=None):
     """
     Pending DB rows that pass tracking-sheet blocks, syntax check, and SEND_ONLY_VERIFIED_EMAILS.
+    Optional job_ids limits to specific rows (batch run). job_title None = all pending titles.
     Returns (candidates, meta) where meta has skip counts for messaging.
     """
-    pending = db.get_pending_applications(job_title)
+    pending = (
+        db.get_pending_applications(None)
+        if job_ids is not None
+        else (
+            db.get_pending_applications(job_title)
+            if job_title
+            else db.get_pending_applications(None)
+        )
+    )
+    if job_ids is not None:
+        allowed = {int(i) for i in job_ids}
+        pending = [j for j in pending if j.get("id") in allowed]
     meta = {"sheet_skipped": 0, "unverified_skipped": 0, "invalid_syntax": 0}
 
     jt = None
@@ -138,12 +150,18 @@ def _send_email(to_email: str, subject: str, body_text: str, body_html: str,
 
 # ─── Application emails ────────────────────────────────────────────────────────
 
-def send_applications(db: Database, job_title: str, dry_run: bool = False) -> int:
+def send_applications(
+    db: Database,
+    job_title: str = None,
+    dry_run: bool = False,
+    job_ids=None,
+) -> int:
     """
     Send one application email per pending row (each recipient gets its own message).
     Skips tracking-sheet blocks, invalid addresses, and unverified guesses when SEND_ONLY_VERIFIED_EMAILS is True.
+    job_ids: if set, only send these database row ids (used by --run batch).
     """
-    pending, meta = application_send_candidates(db, job_title)
+    pending, meta = application_send_candidates(db, job_title, job_ids=job_ids)
 
     if meta["sheet_skipped"]:
         print(

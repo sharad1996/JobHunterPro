@@ -133,6 +133,7 @@ Open `templates.py` to edit:
 | Setting | Default | Description |
 |---|---|---|
 | `FOLLOW_UP_DAYS` | 3 | Days before follow-up is sent |
+| `MAX_JOB_POSTING_AGE_DAYS` | 10 | Only jobs posted within this many days (use 7–10 for a tighter window) |
 | `MAX_RESULTS_PER_PLATFORM` | 15 | Max jobs fetched per platform |
 | `JOB_LOCATION` | "India" | Location for job search |
 | `PLATFORMS` | all 5 | Which platforms to search |
@@ -175,3 +176,23 @@ All applications are stored in `job_hunter.db` (SQLite). You can open this file 
 ---
 
 *Built with Python • Searches LinkedIn, Indeed, Glassdoor, Naukri, Shine • Gmail SMTP • Hunter.io*
+
+
+Commands for next time
+python3 main.py --clear-db --all --yes
+# Delete only unsent / pending jobs (keeps sent history)
+python3 main.py --clear-db --pending --yes
+# Delete jobs older than 30 days
+python3 main.py --clear-db --older-than 30 --yes
+# Delete jobs for one search title only
+python3 main.py --clear-db --job "React Developer" --yes
+
+
+
+Single command
+python3 main.py --run --job "React Developer"
+
+
+Follow-ups (separate, later)
+python3 main.py --followup
+The old step-by-step flow (--job only, manual confirm) still works if you need it; for daily use, prefer --run.

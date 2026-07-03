@@ -43,6 +43,7 @@ def fetch_url(
     timeout_ms: int = 60000,
     storage_state_path: Optional[str] = None,
     headless: bool = True,
+    wait_for_selector: Optional[str] = None,
 ) -> str:
     """
     Return page HTML after Chromium loads the URL.
@@ -87,7 +88,13 @@ def fetch_url(
             context.add_init_script(_STEALTH_INIT)
             page = context.new_page()
             page.goto(full, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(2500)
+            if wait_for_selector:
+                try:
+                    page.wait_for_selector(wait_for_selector, timeout=15000)
+                except Exception:
+                    page.wait_for_timeout(2500)
+            else:
+                page.wait_for_timeout(2500)
             html = page.content()
             context.close()
             return html

@@ -337,10 +337,70 @@ def scrape_wellfound(job_title: str, max_results: int = 30) -> list:
     return []
 
 
+def _parse_himalayas_rss(content: bytes, job_title: str, max_results: int) -> list:
+    """Parse Himalayas Atom RSS (100 most recent remote jobs)."""
+    results = []
+    tokens = _kw_tokens(job_title)
+    soup = BeautifulSoup(content, "xml")
+    entries = soup.find_all("entry") or soup.find_all("item")
+    for entry in entries:
+        title_el = entry.find("title")
+        title = title_el.get_text(strip=True) if title_el else ""
+        if not title or not _matches_keywords(title, tokens):
+            continue
+
+        link_el = entry.find("link", href=True) or entry.find("link")
+        url = ""
+        if link_el is not None:
+            url = (link_el.get("href") or link_el.get_text(strip=True) or "").strip()
+        if not url:
+            id_el = entry.find("id")
+            if id_el:
+                url = id_el.get_text(strip=True)
+        if not url:
+            continue
+
+        company = "Unknown"
+        for child in entry.children:
+            if getattr(child, "name", None) and "companyName" in child.name:
+                company = child.get_text(strip=True) or company
+                break
+
+        pub_el = entry.find("published") or entry.find("updated") or entry.find("pubDate")
+        posted = pub_el.get_text(strip=True) if pub_el else None
+        if not _within_posting_window(posted):
+            continue
+
+        results.append(
+            {
+                "company": company,
+                "title": title,
+                "url": url.split("?")[0],
+                "platform": "Himalayas",
+                "domain": "",
+                "search_country": "Global",
+                "posted_at": posted,
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
 def scrape_himalayas(job_title: str, max_results: int = 30) -> list:
-    """Himalayas is client-rendered; use Playwright when enabled."""
-    print("  → Searching Himalayas…")
-    if getattr(config, "USE_BROWSER_FETCH", False):
+    """Himalayas — public RSS feed (no auth); optional Playwright keyword search as fallback."""
+    print("  → Searching Himalayas (RSS)...")
+    results = []
+    try:
+        r = requests.get("https://himalayas.app/jobs/rss", headers=HEADERS, timeout=25)
+        if r.status_code == 200:
+            results = _parse_himalayas_rss(r.content, job_title, max_results)
+        else:
+            print(f"  ✗ Himalayas RSS: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  ✗ Himalayas RSS error: {e}")
+
+    if not results and getattr(config, "USE_BROWSER_FETCH", False):
         try:
             import browser_fetch
 
@@ -353,9 +413,7 @@ def scrape_himalayas(job_title: str, max_results: int = 30) -> list:
             return results
         except Exception as e:
             print(f"  ✗ Himalayas (browser): {e}")
-            return []
-    print(
-        "  → Himalayas: skipped — set USE_BROWSER_FETCH=True + Playwright "
-        "(see INTEGRATIONS.md)"
-    )
-    return []
+
+    print(f"  ✓ Himalayas: {len(results)} results")
+    _pause()
+    return results

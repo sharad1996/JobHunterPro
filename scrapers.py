@@ -17,6 +17,7 @@ import config
 from job_filters import max_job_posting_age_days
 
 from marketplace_boards import scrape_freelancer, scrape_upwork
+from regional_boards import scrape_bayt, scrape_japan_dev, scrape_tokyodev
 from remote_boards import (
     scrape_remoteok,
     scrape_remotive,
@@ -506,6 +507,16 @@ _GLOBAL_REMOTE_SCRAPERS = {
     "upwork": scrape_upwork,
     "freelancer": scrape_freelancer,
     "himalayas": scrape_himalayas,
+    "tokyodev": scrape_tokyodev,
+    "japan-dev": scrape_japan_dev,
+}
+
+# Per-country scrapers (not in _GLOBAL_REMOTE_SCRAPERS or India-only boards)
+_PER_COUNTRY_SCRAPERS = {
+    "indeed": scrape_indeed,
+    "linkedin": scrape_linkedin,
+    "glassdoor": scrape_glassdoor,
+    "bayt": scrape_bayt,
 }
 
 
@@ -543,13 +554,11 @@ def search_all_platforms(job_title: str) -> list:
         for platform in plats:
             if platform in _GLOBAL_REMOTE_SCRAPERS or platform in ("naukri", "shine"):
                 continue
+            fn = _PER_COUNTRY_SCRAPERS.get(platform)
+            if not fn:
+                continue
             try:
-                if platform == "indeed":
-                    all_jobs.extend(scrape_indeed(job_title, country, max_r, remote))
-                elif platform == "linkedin":
-                    all_jobs.extend(scrape_linkedin(job_title, country, max_r, remote))
-                elif platform == "glassdoor":
-                    all_jobs.extend(scrape_glassdoor(job_title, country, max_r, remote))
+                all_jobs.extend(fn(job_title, country, max_r, remote))
             except Exception as e:
                 print(f"  ✗ {platform} ({country}) failed: {e}")
 

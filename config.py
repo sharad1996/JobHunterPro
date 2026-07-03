@@ -86,6 +86,50 @@ YOUR_LOCATION   = "Indore, India"
 YOUR_EXPERIENCE = "7"                            # Years of experience (used in email body)
 
 # ─────────────────────────────────────────────
+# 🎯 CANDIDATE PROFILE  (used to TAILOR each application email to the role)
+# ─────────────────────────────────────────────
+# One-line headline shown in the email opening. Keep it to your real specialty.
+YOUR_HEADLINE  = "Full-Stack Engineer (React · Next.js · Node.js)"
+
+# GitHub / portfolio link shown in the email + signature. Leave "" to hide it.
+YOUR_PORTFOLIO = ""   # e.g. "https://github.com/your-handle"
+
+# Skills you can CREDIBLY claim. The email surfaces the ones that match each job title,
+# so a React role sees your React skills and a Node role sees your backend skills.
+YOUR_SKILLS = [
+    "React", "Next.js", "TypeScript", "Redux", "Tailwind",
+    "Node.js", "Express", "Nest.js", "REST APIs", "Microservices",
+    "AWS", "GCP", "Docker", "CI/CD",
+    "PostgreSQL", "MongoDB", "Redis",
+    "performance optimization", "system design",
+]
+
+# Achievements tagged by keyword. The email shows the 3 whose keywords best match the
+# role title. KEEP THESE TRUE AND SPECIFIC — recruiters verify them in interviews.
+ACHIEVEMENTS = [
+    {"keywords": ["react", "frontend", "front-end", "next", "ui", "typescript", "javascript", "web"],
+     "text": "Cut page-load times ~35% on a React/Next.js SaaS frontend using code-splitting, lazy loading, and render optimization."},
+    {"keywords": ["node", "backend", "back-end", "api", "rest", "microservice", "server"],
+     "text": "Built and scaled Node.js REST APIs serving 10k+ daily active users with no downtime during peak traffic."},
+    {"keywords": ["security", "auth", "authentication", "jwt", "oauth"],
+     "text": "Implemented JWT auth and Bcrypt password storage, reducing login-related incidents ~40%."},
+    {"keywords": ["aws", "gcp", "cloud", "devops", "docker", "ci", "cd", "infrastructure", "sre", "reliability"],
+     "text": "Set up Docker + GitHub Actions CI/CD with Grafana/Sentry monitoring across client-facing apps."},
+    {"keywords": ["database", "postgres", "mongodb", "mysql", "sql", "data"],
+     "text": "Designed and optimized PostgreSQL/MongoDB data layers powering high-traffic SaaS products."},
+    {"keywords": ["e-commerce", "ecommerce", "commerce", "shop", "cart", "payment", "checkout"],
+     "text": "Delivered e-commerce flows (catalog, cart, payments) and lifted conversion via a faster, responsive frontend."},
+]
+
+# Used to top up when fewer than 3 ACHIEVEMENTS match the role. Keep these on DISTINCT themes
+# (scale, ownership, remote delivery) so a top-up never echoes an already-shown bullet.
+DEFAULT_ACHIEVEMENTS = [
+    "Built and scaled web applications serving 10k+ daily active users with high reliability.",
+    "Shipped features end-to-end — React/Next.js frontends through Node.js backends and deploys.",
+    "Delivered in distributed remote teams across time zones with strong async communication.",
+]
+
+# ─────────────────────────────────────────────
 # 📄 RESUME FILE
 # ─────────────────────────────────────────────
 RESUME_PATH = "resume.pdf"                       # Place your PDF resume in the same folder
@@ -104,7 +148,7 @@ MAX_RESULTS_PER_PLATFORM = 100                   # Max jobs per platform *per co
 MAX_JOB_POSTING_AGE_DAYS = 10
 
 # One-shot batch (--run): find jobs + verified emails + sheet + DB + send for this many new listings.
-BATCH_JOB_LIMIT = 25
+BATCH_JOB_LIMIT = 50
 # In batch mode, skip pattern-guessed emails unless SEND_ONLY_VERIFIED_EMAILS is False.
 BATCH_REQUIRE_VERIFIED_EMAIL = True
 
@@ -117,23 +161,9 @@ REMOTE_ONLY = True
 # At least 5 countries recommended — each entry is one regional search (LinkedIn/Indeed/Glassdoor).
 # Naukri & Shine run only when one of these names matches India (see README).
 TARGET_COUNTRIES = [
-    "Australia",
-    "Dubai",
-    "Singapore",
-    "Japan",
-    "Malaysia",
-    "New Zealand",
-    "Philippines",
-    "South Korea",
-    "Thailand",
-    "Vietnam",
-    "Hong Kong",
-    "Macau",
     "India",
-    "United States",
-    "United Kingdom",
     "Germany",
-    "Canada",
+    "Dubai",
 ]
 
 # Order matters: global boards (API/RSS) run first, then per-country scrapers.
@@ -143,21 +173,18 @@ PLATFORMS = [
     "remoteok",
     "remotive",
     "weworkremotely",
-    "justremote",
-    "skipthedrive",
-    "freelancer",   # public Freelancer.com read API (no token)
+    "justremote",# public Freelancer.com read API (no token)
     "linkedin",
-    "naukri",
     "shine",
     "arc.dev",
-    "glassdoor",
     "ziprecruiter",
     "careerbuilder",
     "dice",
-    "simplyhired",
+    "himalayas",
+    "japan-dev",
 ]
 
-# Append stub / paywall boards (Himalayas only does something when USE_BROWSER_FETCH is True).
+# Append stub / paywall boards (Wellfound needs Playwright when USE_BROWSER_FETCH is True).
 INCLUDE_STUB_PLATFORMS = False
 
 # Append Upwork (requires UPWORK_ACCESS_TOKEN from OAuth — see INTEGRATIONS.md).

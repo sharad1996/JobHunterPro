@@ -182,6 +182,7 @@ PLATFORMS = [
     "dice",
     "himalayas",
     "japan-dev",
+    "indeed",          # needs USE_BROWSER_FETCH=True; often Cloudflare-blocked without --auth-indeed
 ]
 
 # Append stub / paywall boards (Wellfound needs Playwright when USE_BROWSER_FETCH is True).

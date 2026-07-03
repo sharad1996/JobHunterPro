@@ -169,15 +169,21 @@ def parse_indeed_like_html(html: str, origin: str, job_title: str, location: str
     cards = (
         soup.select("div.job_seen_beacon")
         or soup.select("div[class*='jobCard']")
+        or soup.select("#mosaic-provider-jobcards div.result")
         or soup.select("td.resultContent")
     )
     out = []
     for card in cards[:max_results]:
         try:
-            company_el = card.select_one("span[data-testid='company-name']") or card.select_one(".companyName")
+            company_el = (
+                card.select_one("span[data-testid='company-name']")
+                or card.select_one(".companyName")
+                or card.select_one("[data-company-name]")
+            )
             if not company_el:
                 continue
             company = company_el.get_text(strip=True)
+
             link_el = card.select_one("a[data-jk]") or card.select_one("h2.jobTitle a")
             job_url = ""
             if link_el:
@@ -188,17 +194,33 @@ def parse_indeed_like_html(html: str, origin: str, job_title: str, location: str
                     job_url = href
                 else:
                     job_url = urllib.parse.urljoin(origin + "/", href)
+
+            title_el = (
+                card.select_one("h2.jobTitle span[title]")
+                or card.select_one("h2.jobTitle a span")
+                or card.select_one("h2.jobTitle a")
+                or card.select_one("h2.jobTitle")
+            )
+            title = title_el.get_text(strip=True) if title_el else job_title
+
+            date_el = (
+                card.select_one("span[data-testid='myJobsStateDate']")
+                or card.select_one(".date")
+            )
+            posted_at = date_el.get_text(strip=True) if date_el else None
+
             if company:
-                out.append(
-                    {
-                        "company": company,
-                        "title": job_title,
-                        "url": job_url,
-                        "platform": "Indeed",
-                        "domain": "",
-                        "search_country": location,
-                    }
-                )
+                job = {
+                    "company": company,
+                    "title": title,
+                    "url": job_url,
+                    "platform": "Indeed",
+                    "domain": "",
+                    "search_country": location,
+                }
+                if posted_at:
+                    job["posted_at"] = posted_at
+                out.append(job)
         except Exception:
             continue
     return out

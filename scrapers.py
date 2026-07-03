@@ -214,7 +214,11 @@ def scrape_indeed(
                             "  ⚠ Indeed: INDEED_USE_AUTH_STATE=True but no session file — "
                             "run: python3 main.py --auth-indeed"
                         )
-                html = browser_fetch.fetch_url(full_url, storage_state_path=storage)
+                html = browser_fetch.fetch_url(
+                    full_url,
+                    storage_state_path=storage,
+                    wait_for_selector="div.job_seen_beacon, #mosaic-provider-jobcards",
+                )
             except Exception as e:
                 print(f"  ⚠ Indeed (Playwright): {e}")
 

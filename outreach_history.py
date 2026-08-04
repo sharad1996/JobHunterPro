@@ -147,6 +147,12 @@ class OutreachHistory:
             "hr_email_verified"
         ):
             return None
+        # Screen replayed addresses too. Older rows were saved before the placeholder
+        # blocklist was tightened, so the database still holds things like
+        # john.doe@company.com marked "verified" — reusing those would keep them alive
+        # forever instead of letting a fresh lookup find the real address.
+        if _is_junk(hit.get("hr_email")):
+            return None
         return dict(hit)
 
     def summary(self) -> str:
@@ -154,6 +160,16 @@ class OutreachHistory:
             f"{self.rows_loaded} history row(s): {len(self.sent_companies)} company(ies) "
             f"already emailed, {len(self.known_emails)} known address(es)"
         )
+
+
+def _is_junk(email: str) -> bool:
+    """Placeholder/no-reply screen. Imported lazily — email_finder is a heavy module."""
+    try:
+        from email_finder import is_junk_email
+
+        return is_junk_email(email)
+    except Exception:
+        return not (email or "").strip()
 
 
 def _get(row, key: str):

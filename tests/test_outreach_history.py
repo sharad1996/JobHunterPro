@@ -123,23 +123,25 @@ class TestKnownEmail(unittest.TestCase):
     def setUp(self):
         self.h = oh.OutreachHistory.from_rows(
             [
+                # NB: not acme.com / company.com — those are placeholder domains and are
+                # deliberately screened out of the reuse path.
                 _row(
                     "Acme Corp",
                     "React Developer",
-                    hr_email="hr@acme.com",
+                    hr_email="hr@acmecorp.io",
                     hr_name="Jane",
-                    company_domain="acme.com",
+                    company_domain="acmecorp.io",
                     hr_email_verified=1,
                 ),
-                _row("Guessy Co", "X", hr_email="hr@guessy.com", hr_email_verified=0),
+                _row("Guessy Co", "X", hr_email="hr@guessyco.io", hr_email_verified=0),
             ]
         )
 
     def test_returns_verified_address(self):
         hit = self.h.known_email("Acme Corp")
-        self.assertEqual(hit["hr_email"], "hr@acme.com")
+        self.assertEqual(hit["hr_email"], "hr@acmecorp.io")
         self.assertEqual(hit["hr_name"], "Jane")
-        self.assertEqual(hit["domain"], "acme.com")
+        self.assertEqual(hit["domain"], "acmecorp.io")
         self.assertTrue(hit["hr_email_verified"])
 
     def test_lookup_is_normalised(self):
@@ -150,7 +152,7 @@ class TestKnownEmail(unittest.TestCase):
 
     @patch.object(config, "REUSE_ONLY_VERIFIED_COMPANY_EMAILS", False)
     def test_guessed_address_allowed_when_configured(self):
-        self.assertEqual(self.h.known_email("Guessy Co")["hr_email"], "hr@guessy.com")
+        self.assertEqual(self.h.known_email("Guessy Co")["hr_email"], "hr@guessyco.io")
 
     @patch.object(config, "REUSE_KNOWN_COMPANY_EMAILS", False)
     def test_reuse_can_be_disabled(self):
@@ -162,20 +164,64 @@ class TestKnownEmail(unittest.TestCase):
     def test_returned_dict_is_a_copy(self):
         """Callers mutate the result into the job dict; the index must not be corrupted."""
         self.h.known_email("Acme Corp")["hr_email"] = "tampered@x.com"
-        self.assertEqual(self.h.known_email("Acme Corp")["hr_email"], "hr@acme.com")
+        self.assertEqual(self.h.known_email("Acme Corp")["hr_email"], "hr@acmecorp.io")
 
     def test_verified_row_wins_over_guessed_for_same_company(self):
         h = oh.OutreachHistory.from_rows(
             [
-                _row("Dup Co", "A", hr_email="guess@dup.com", hr_email_verified=0),
-                _row("Dup Co", "B", hr_email="real@dup.com", hr_email_verified=1),
+                _row("Dup Co", "A", hr_email="guess@dupco.io", hr_email_verified=0),
+                _row("Dup Co", "B", hr_email="real@dupco.io", hr_email_verified=1),
             ]
         )
-        self.assertEqual(h.known_email("Dup Co")["hr_email"], "real@dup.com")
+        self.assertEqual(h.known_email("Dup Co")["hr_email"], "real@dupco.io")
 
     def test_rows_without_email_are_not_indexed(self):
         h = oh.OutreachHistory.from_rows([_row("Empty Co", "A", hr_email="")])
         self.assertIsNone(h.known_email("Empty Co"))
+
+
+class TestPlaceholderAddressesNotReplayed(unittest.TestCase):
+    """The DB already holds placeholder addresses saved as 'verified' by older runs.
+
+    Reusing them would keep a dead address alive forever instead of letting a fresh
+    lookup find the real one.
+    """
+
+    def _known(self, email):
+        h = oh.OutreachHistory.from_rows(
+            [_row("Ghost Co", "A", hr_email=email, hr_email_verified=1)]
+        )
+        return h.known_email("Ghost Co")
+
+    def test_documentation_names_rejected(self):
+        for bad in (
+            "john.doe@company.com",
+            "jane.doe@acme.com",
+            "john.smith@company.com",
+            "fullname@company.com",
+            "john@doe.com",
+            "yourname@example.com",
+        ):
+            with self.subTest(bad=bad):
+                self.assertIsNone(self._known(bad), f"{bad} should not be replayed")
+
+    def test_noreply_rejected(self):
+        self.assertIsNone(self._known("noreply@realcompany.com"))
+
+    def test_real_addresses_still_reused(self):
+        for good in (
+            "hr@realcompany.com",
+            "careers@startup.io",
+            "support@micro1.ai",
+            "partnercontact@backblaze.com",
+            "barbara@consulting.de",
+            "foods@grocer.com",
+            "sam.barnes@agency.co.uk",
+        ):
+            with self.subTest(good=good):
+                hit = self._known(good)
+                self.assertIsNotNone(hit, f"{good} should still be reusable")
+                self.assertEqual(hit["hr_email"], good)
 
 
 class TestRowAccess(unittest.TestCase):
@@ -190,7 +236,7 @@ class TestRowAccess(unittest.TestCase):
             " company_domain TEXT, hr_email_verified INT, email_status TEXT)"
         )
         conn.execute(
-            "INSERT INTO jobs VALUES ('Acme','React Developer','hr@acme.com','','acme.com',1,'sent')"
+            "INSERT INTO jobs VALUES ('Acme','React Developer','hr@acmecorp.io','','acmecorp.io',1,'sent')"
         )
         rows = conn.execute("SELECT * FROM jobs").fetchall()
         h = oh.OutreachHistory.from_rows(rows)

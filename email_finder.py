@@ -40,6 +40,14 @@ _EMAIL_JUNK_LOCAL = (
     "postmaster", "abuse", "unsubscribe", "newsletter", "marketing",
     "privacy", "legal", "dmca", "webmaster", "sentry", "wixpress",
     "example", "test", "placeholder", "yourname", "email@",
+    # Documentation/mockup names. Contact pages and form placeholders are full of these,
+    # and they were being saved as *verified* addresses (e.g. john.doe@company.com).
+    # NOTE: these are matched as SUBSTRINGS of the local part, so every entry must be
+    # long and distinctive — "bar" would blocklist barbara@, "foo" would hit foods@.
+    "john.doe", "johndoe", "jane.doe", "janedoe", "john.smith", "johnsmith",
+    "jane.smith", "janesmith", "firstname", "first.last", "lastname",
+    "fullname", "your.name", "yourname", "your.email", "youremail",
+    "lorem", "ipsum", "dummyemail", "placeholder",
 )
 
 _EMAIL_JUNK_DOMAINS = (
@@ -47,6 +55,11 @@ _EMAIL_JUNK_DOMAINS = (
     "schema.org", "w3.org", "googleapis.com", "cloudflare.com",
     "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
     "youtube.com", "gravatar.com", "github.com",
+    # Placeholder domains that appear in sample markup, never real employers.
+    "company.com", "acme.com", "acme.co", "doe.com", "yourcompany.com",
+    "yourdomain.com", "mycompany.com", "example.org", "example.net",
+    "test.com", "sample.com", "domain.co", "site.com", "website.com",
+    "placeholder.com", "lorem.com", "foo.com", "bar.com", "email.address",
 )
 
 _HR_LOCAL_KEYWORDS = (
@@ -97,6 +110,11 @@ def _decode_email_obfuscation(text: str) -> str:
     t = re.sub(r"\s*\[\s*dot\s*\]\s*", ".", t, flags=re.I)
     t = re.sub(r"\s*\(\s*dot\s*\)\s*", ".", t, flags=re.I)
     return t
+
+
+def is_junk_email(email: str) -> bool:
+    """Public alias — also used to screen addresses replayed from the database."""
+    return _is_junk_email(email)
 
 
 def _is_junk_email(email: str) -> bool:

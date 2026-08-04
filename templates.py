@@ -26,8 +26,16 @@ def _matching_skills(job_title: str, limit: int = 6) -> list:
     return matched[:limit]
 
 
-def _relevant_achievements(job_title: str, count: int = 3) -> list:
-    """Top achievements by keyword overlap with the title; falls back to defaults."""
+def _relevant_achievements(job_title: str, count: int = 2) -> list:
+    """
+    Achievements whose keywords actually overlap the title, best match first.
+
+    Deliberately returns FEWER than `count` — or nothing at all — rather than padding with
+    config.DEFAULT_ACHIEVEMENTS. Generic bullets ("7+ years of relevant industry experience")
+    are the clearest signal of a mass-mailed application, so an unmatched role gets no bullet
+    list; an email with two specific claims beats one with two specific claims and a filler.
+    An empty return means the role is a poor fit and is worth not sending at all.
+    """
     title_toks = _tokens(job_title)
     scored = []
     for ach in config.ACHIEVEMENTS:
@@ -35,15 +43,7 @@ def _relevant_achievements(job_title: str, count: int = 3) -> list:
         if score:
             scored.append((score, ach["text"]))
     scored.sort(key=lambda x: x[0], reverse=True)
-    picked = [text for _, text in scored[:count]]
-    if len(picked) < count:
-        # Top up with defaults we haven't already used.
-        for text in config.DEFAULT_ACHIEVEMENTS:
-            if text not in picked:
-                picked.append(text)
-            if len(picked) >= count:
-                break
-    return picked[:count]
+    return [text for _, text in scored[:count]]
 
 
 def _greeting(hr_name: str) -> str:
@@ -52,22 +52,43 @@ def _greeting(hr_name: str) -> str:
     return f"Hi {first}," if first else "Hello,"
 
 
-def _skills_clause(job_title: str) -> str:
-    """A short 'my X, Y, Z line up with this role' clause, or '' if no match."""
-    skills = _matching_skills(job_title)
-    if not skills:
-        return ""
-    if len(skills) == 1:
-        joined = skills[0]
-    elif len(skills) == 2:
-        joined = f"{skills[0]} and {skills[1]}"
-    else:
-        joined = ", ".join(skills[:-1]) + f", and {skills[-1]}"
-    return f"My work with {joined} lines up closely with what you're hiring for."
+def _stack_tag(job_title: str) -> str:
+    """
+    Short 'React/Next.js' tag for the subject line.
+
+    Uses role-matched skills only when TWO of them match — one lone match reads thin
+    ("React, 7 yrs"), and a single weak match reads bizarre (a CRO role matching
+    "performance optimization"). Otherwise falls back to your headline's parenthetical,
+    which is a stable statement of specialty rather than an artifact of keyword overlap.
+    """
+    skills = _matching_skills(job_title, limit=2)
+    if len(skills) < 2:
+        # "Full-Stack Engineer (React · Next.js · Node.js)" → "React/Next.js"
+        inner = re.search(r"\(([^)]*)\)", config.YOUR_HEADLINE or "")
+        if not inner:
+            return "/".join(skills)
+        parts = [p.strip() for p in re.split(r"[·,/]", inner.group(1)) if p.strip()]
+        skills = parts[:2]
+    return "/".join(skills)
+
+
+def _pitch() -> str:
+    """The one-line pitch. Hand-written in config; never case-mangled."""
+    pitch = (getattr(config, "YOUR_PITCH", "") or "").strip()
+    if pitch:
+        return pitch
+    return (
+        f"{config.YOUR_EXPERIENCE}+ years shipping production web applications as a "
+        f"{config.YOUR_HEADLINE}."
+    )
+
+
+def _availability() -> str:
+    return (getattr(config, "AVAILABILITY_LINE", "") or "").strip()
 
 
 def _portfolio_text_line() -> str:
-    return f"Portfolio / code: {config.YOUR_PORTFOLIO}\n" if config.YOUR_PORTFOLIO else ""
+    return f"Code: {config.YOUR_PORTFOLIO}\n" if config.YOUR_PORTFOLIO else ""
 
 
 def application_email(job_title: str, company: str, hr_name: str = "") -> dict:
@@ -77,39 +98,46 @@ def application_email(job_title: str, company: str, hr_name: str = "") -> dict:
     """
     greeting = _greeting(hr_name)
     achievements = _relevant_achievements(job_title)
-    skills_clause = _skills_clause(job_title)
+    stack = _stack_tag(job_title)
 
-    subject = f"Application: {job_title} — {config.YOUR_NAME} ({config.YOUR_EXPERIENCE}+ yrs)"
+    # Role first — recruiters scan a full inbox by role, and a leading "Application:" wastes
+    # the scannable prefix. The stack tag is the differentiator, not the years.
+    tag = f" ({stack}, {config.YOUR_EXPERIENCE} yrs)" if stack else ""
+    subject = f"{job_title} — {config.YOUR_NAME}{tag}"
 
-    intro = (
-        f"I'm applying for the {job_title} role at {company}. I'm a "
-        f"{config.YOUR_HEADLINE.lower()} with {config.YOUR_EXPERIENCE}+ years shipping "
-        f"production web applications."
+    opener = f"Applying for the {job_title} role at {company}."
+
+    # Only written when something genuinely matched — see _relevant_achievements.
+    lead_in = (
+        "The two most relevant pieces:" if len(achievements) > 1 else "Most relevant:"
     )
-    if skills_clause:
-        intro += " " + skills_clause
 
-    bullets_text = "\n".join(f"  • {a}" for a in achievements)
-
-    body_text = f"""\
-{greeting}
-
-{intro}
-
-A few relevant things I've done:
-{bullets_text}
-
-My resume is attached. I'd welcome a short call to see if it's a fit — you can reach me at {config.YOUR_PHONE} or reply here.
-{_portfolio_text_line()}
-Thanks for your time,
-{config.YOUR_NAME}
-{config.YOUR_EMAIL} · {config.YOUR_PHONE}
-LinkedIn: {config.YOUR_LINKEDIN}
-"""
+    blocks_text = [greeting, "", opener, "", _pitch()]
+    if achievements:
+        blocks_text += ["", lead_in, ""]
+        blocks_text += [f"  • {a}" for a in achievements]
+    if _availability():
+        blocks_text += ["", _availability()]
+    blocks_text += [
+        "",
+        "Resume attached. Happy to take a short take-home if that's a faster read than a call.",
+        "",
+    ]
+    if _portfolio_text_line():
+        blocks_text.append(_portfolio_text_line().rstrip("\n"))
+    blocks_text += [
+        config.YOUR_NAME,
+        f"{config.YOUR_EMAIL} · {config.YOUR_LINKEDIN}",
+    ]
+    body_text = "\n".join(blocks_text) + "\n"
 
     bullets_html = "\n".join(f"    <li>{a}</li>" for a in achievements)
+    achievements_html = (
+        f"  <p>{lead_in}</p>\n  <ul>\n{bullets_html}\n  </ul>\n" if achievements else ""
+    )
+    availability_html = f"  <p>{_availability()}</p>\n" if _availability() else ""
     portfolio_html = (
-        f'    🔗 <a href="{config.YOUR_PORTFOLIO}">{config.YOUR_PORTFOLIO}</a><br>\n'
+        f'    <a href="{config.YOUR_PORTFOLIO}">{config.YOUR_PORTFOLIO}</a><br>\n'
         if config.YOUR_PORTFOLIO
         else ""
     )
@@ -134,19 +162,15 @@ LinkedIn: {config.YOUR_LINKEDIN}
 <div class="container">
   <p>{greeting}</p>
 
-  <p>{intro}</p>
+  <p>{opener}</p>
 
-  <p><strong>A few relevant things I've done:</strong></p>
-  <ul>
-{bullets_html}
-  </ul>
+  <p>{_pitch()}</p>
 
-  <p>My resume is attached. I'd welcome a short call to see if it's a fit — you can reach me at
-  <strong>{config.YOUR_PHONE}</strong> or reply to this email.</p>
+{achievements_html}{availability_html}  <p>Resume attached. Happy to take a short take-home if that's a faster read than a call.</p>
 
   <div class="signature">
     <strong>{config.YOUR_NAME}</strong><br>
-    {config.YOUR_EMAIL} · {config.YOUR_PHONE}<br>
+    {config.YOUR_EMAIL}<br>
 {portfolio_html}    <a href="{config.YOUR_LINKEDIN}">LinkedIn</a>
   </div>
 </div>
@@ -161,25 +185,20 @@ def followup_email(job_title: str, company: str, hr_name: str = "") -> dict:
     Returns { subject, body_text, body_html } for a short, non-pushy follow-up.
     """
     greeting = _greeting(hr_name)
-    skills_clause = _skills_clause(job_title)
-    nudge = (
-        f" {skills_clause}"
-        if skills_clause
-        else " I'd still love the chance to show how I can contribute."
-    )
 
     subject = f"Re: {job_title} application — {config.YOUR_NAME}"
 
+    # One job: make replying cheaper than ignoring. No re-pitch, no enthusiasm padding —
+    # a second email that restates the first is the one that gets filtered.
     body_text = f"""\
 {greeting}
 
-Following up on my application for the {job_title} role at {company}.{nudge}
+Following up on my application for the {job_title} role at {company}.
 
-Happy to share more detail or hop on a quick call whenever it's convenient. If the role is filled, a quick note is appreciated so I can plan accordingly.
+Still interested. If it's filled or I'm not the right fit, a one-line reply is all I need — I'll stop chasing.
 
-Thanks again,
 {config.YOUR_NAME}
-{config.YOUR_EMAIL} · {config.YOUR_PHONE}
+{config.YOUR_EMAIL} · {config.YOUR_LINKEDIN}
 """
 
     body_html = f"""\
@@ -201,14 +220,14 @@ Thanks again,
   <p>{greeting}</p>
 
   <p>Following up on my application for the <strong>{job_title}</strong> role at
-  <strong>{company}</strong>.{nudge}</p>
+  <strong>{company}</strong>.</p>
 
-  <p>Happy to share more detail or hop on a quick call whenever it's convenient. If the role is
-  already filled, a quick note is appreciated so I can plan accordingly.</p>
+  <p>Still interested. If it's filled or I'm not the right fit, a one-line reply is all I
+  need — I'll stop chasing.</p>
 
   <div class="signature">
     <strong>{config.YOUR_NAME}</strong><br>
-    {config.YOUR_EMAIL} · {config.YOUR_PHONE}<br>
+    {config.YOUR_EMAIL}<br>
     <a href="{config.YOUR_LINKEDIN}">LinkedIn</a>
   </div>
 </div>

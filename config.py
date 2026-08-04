@@ -91,7 +91,23 @@ YOUR_EXPERIENCE = "7"                            # Years of experience (used in 
 # One-line headline shown in the email opening. Keep it to your real specialty.
 YOUR_HEADLINE  = "Full-Stack Engineer (React · Next.js · Node.js)"
 
+# The second sentence of every application email — your pitch in one line. This is the
+# highest-leverage sentence you own, so it is written by hand rather than assembled from
+# YOUR_HEADLINE. Keep it concrete and free of hedging ("confident", "passionate", "eager").
+# Leave "" to fall back to a generic line built from YOUR_HEADLINE.
+YOUR_PITCH = (
+    "Seven years building production React/Next.js frontends on Node.js backends."
+)
+
+# Answers the first objection on any remote role: which hours do you actually work?
+# Must stay TRUE — recruiters hold you to it. Leave "" to omit the line entirely.
+AVAILABILITY_LINE = (
+    "I work remotely and fit the team's core hours, whatever the timezone."
+)
+
 # GitHub / portfolio link shown in the email + signature. Leave "" to hide it.
+# Set this only once the profile is worth landing on — pinned real projects, no
+# self-deprecating README. An empty value is safer than a link that argues against you.
 YOUR_PORTFOLIO = ""   # e.g. "https://github.com/your-handle"
 
 # Skills you can CREDIBLY claim. The email surfaces the ones that match each job title,
@@ -121,8 +137,12 @@ ACHIEVEMENTS = [
      "text": "Delivered e-commerce flows (catalog, cart, payments) and lifted conversion via a faster, responsive frontend."},
 ]
 
-# Used to top up when fewer than 3 ACHIEVEMENTS match the role. Keep these on DISTINCT themes
-# (scale, ownership, remote delivery) so a top-up never echoes an already-shown bullet.
+# NO LONGER INJECTED INTO EMAILS. These used to top up the bullet list when fewer than 3
+# ACHIEVEMENTS matched a role, which meant off-target applications went out carrying generic
+# padding — the clearest tell of a mass mail. templates.py now shows only genuine keyword
+# matches, and an empty match list means the role is a poor fit worth skipping. Kept here as
+# raw material: if a line below is true and you can attach a NUMBER to it, promote it into
+# ACHIEVEMENTS above with proper keywords instead.
 DEFAULT_ACHIEVEMENTS = [
     "Built and scaled web applications serving 10k+ daily active users with high reliability.",
     "Shipped features end-to-end — React/Next.js frontends through Node.js backends and deploys.",
@@ -148,7 +168,7 @@ MAX_RESULTS_PER_PLATFORM = 100                   # Max jobs per platform *per co
 MAX_JOB_POSTING_AGE_DAYS = 10
 
 # One-shot batch (--run): find jobs + verified emails + sheet + DB + send for this many new listings.
-BATCH_JOB_LIMIT = 100
+BATCH_JOB_LIMIT = 20
 # In batch mode, skip pattern-guessed emails unless SEND_ONLY_VERIFIED_EMAILS is False.
 BATCH_REQUIRE_VERIFIED_EMAIL = True
 

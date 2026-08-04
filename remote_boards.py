@@ -27,6 +27,31 @@ HEADERS = {
 }
 
 
+# Jobicy `geo` slugs, keyed by TARGET_COUNTRIES labels. Only these values are valid —
+# anything else returns HTTP 400, so unmapped countries (India, UAE, Vietnam, NZ…) are
+# deliberately absent and get covered by the unfiltered sweep at the end instead.
+# Verified live: germany, usa, uk, canada, australia, europe, singapore, japan, france,
+# spain, netherlands, poland, ukraine, philippines.
+_JOBICY_GEOS = {
+    "germany": "germany",
+    "united kingdom": "uk",
+    "uk": "uk",
+    "united states": "usa",
+    "usa": "usa",
+    "us": "usa",
+    "canada": "canada",
+    "australia": "australia",
+    "singapore": "singapore",
+    "japan": "japan",
+    "france": "france",
+    "spain": "spain",
+    "netherlands": "netherlands",
+    "poland": "poland",
+    "ukraine": "ukraine",
+    "philippines": "philippines",
+}
+
+
 def _pause():
     time.sleep(random.uniform(1.0, 2.2))
 
@@ -47,6 +72,150 @@ def _within_posting_window(posted_value) -> bool:
     if dt is None:
         return True
     return posted_at_within_window(dt)
+
+
+def _remote_wanted() -> bool:
+    return bool(getattr(config, "REMOTE_ONLY", False))
+
+
+def scrape_arbeitnow(job_title: str, max_results: int = 50) -> list:
+    """
+    https://www.arbeitnow.com/api/job-board-api — free, no key, paginated.
+
+    Returns Europe-heavy listings (many visa-sponsor / English-speaking roles) with a
+    clean shape: company_name, title, url, location, remote, created_at (epoch seconds).
+    """
+    results = []
+    print("  → Searching Arbeitnow (API)...")
+    tokens = _kw_tokens(job_title)
+    seen = set()
+    try:
+        pages = max(1, int(getattr(config, "ARBEITNOW_MAX_PAGES", 3)))
+        for page in range(1, pages + 1):
+            r = requests.get(
+                "https://www.arbeitnow.com/api/job-board-api",
+                headers=HEADERS,
+                params={"page": page},
+                timeout=25,
+            )
+            if r.status_code != 200:
+                print(f"  ✗ Arbeitnow: HTTP {r.status_code}")
+                break
+            jobs = (r.json() or {}).get("data") or []
+            if not jobs:
+                break
+            for j in jobs:
+                company = (j.get("company_name") or "").strip()
+                title = (j.get("title") or "").strip()
+                url = (j.get("url") or "").strip()
+                if not (company and url):
+                    continue
+                tag_blob = " ".join(j.get("tags") or []) + " " + " ".join(j.get("job_types") or [])
+                if not _matches_keywords(f"{title} {tag_blob}", tokens):
+                    continue
+                if not _within_posting_window(j.get("created_at")):
+                    continue
+                if _remote_wanted() and not j.get("remote"):
+                    # keep explicit remote listings only when REMOTE_ONLY is set
+                    if "remote" not in f"{title} {j.get('location') or ''}".lower():
+                        continue
+                key = url.split("?")[0].lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(
+                    {
+                        "company": company,
+                        "title": title or job_title,
+                        "url": url,
+                        "platform": "Arbeitnow",
+                        "domain": "",
+                        "search_country": (j.get("location") or "Global").strip() or "Global",
+                        "posted_at": j.get("created_at"),
+                    }
+                )
+                if len(results) >= max_results:
+                    break
+            if len(results) >= max_results:
+                break
+            _pause()
+        print(f"  ✓ Arbeitnow: {len(results)} results")
+    except Exception as e:
+        print(f"  ✗ Arbeitnow error: {e}")
+    _pause()
+    return results
+
+
+def scrape_jobicy(job_title: str, max_results: int = 50) -> list:
+    """
+    https://jobicy.com/api/v2/remote-jobs — free, no key, remote-only by definition.
+
+    `geo` accepts region slugs (india, europe, usa, apac…); we query the configured
+    TARGET_COUNTRIES that Jobicy recognises, then fall back to an unfiltered call.
+    """
+    results = []
+    print("  → Searching Jobicy (API)...")
+    tokens = _kw_tokens(job_title)
+    seen = set()
+
+    geos = []
+    for c in (getattr(config, "TARGET_COUNTRIES", None) or []):
+        slug = _JOBICY_GEOS.get((c or "").lower().strip())
+        if slug and slug not in geos:
+            geos.append(slug)
+    geos.append(None)  # unfiltered sweep last
+
+    try:
+        for geo in geos:
+            if len(results) >= max_results:
+                break
+            params = {"count": 50, "tag": job_title}
+            if geo:
+                params["geo"] = geo
+            r = requests.get(
+                "https://jobicy.com/api/v2/remote-jobs",
+                headers=HEADERS,
+                params=params,
+                timeout=25,
+            )
+            if r.status_code != 200:
+                print(f"  ✗ Jobicy ({geo or 'all'}): HTTP {r.status_code}")
+                continue
+            jobs = (r.json() or {}).get("jobs") or []
+            for j in jobs:
+                company = (j.get("companyName") or "").strip()
+                title = (j.get("jobTitle") or "").strip()
+                url = (j.get("url") or "").strip()
+                if not (company and url):
+                    continue
+                industry = " ".join(j.get("jobIndustry") or [])
+                if not _matches_keywords(f"{title} {industry}", tokens):
+                    continue
+                if not _within_posting_window(j.get("pubDate")):
+                    continue
+                key = url.split("?")[0].lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(
+                    {
+                        "company": company,
+                        "title": title or job_title,
+                        "url": url,
+                        "platform": "Jobicy",
+                        "domain": "",
+                        "search_country": (j.get("jobGeo") or "Global").strip() or "Global",
+                        "posted_at": j.get("pubDate"),
+                    }
+                )
+                if len(results) >= max_results:
+                    break
+            _pause()
+        print(f"  ✓ Jobicy: {len(results)} results")
+    except Exception as e:
+        print(f"  ✗ Jobicy error: {e}")
+    _pause()
+    return results
 
 
 def scrape_remoteok(job_title: str, max_results: int = 50) -> list:

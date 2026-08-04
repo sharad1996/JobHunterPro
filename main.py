@@ -592,6 +592,82 @@ def cmd_sync_from_xlsx():
     cmd_sync_xlsx()
 
 
+def cmd_harvest_ats(dry_run: bool = False):
+    """
+    Scan every job URL already collected (SQLite + Excel) for Greenhouse / Lever / Ashby
+    board tokens and append the new ones to ATS_TOKENS_FILE.
+
+    Those three boards have no cross-company search, so this is how coverage grows:
+    every run that lands an ATS link teaches the next run a new company board.
+    """
+    import ats_boards
+    import config
+    from database import Database
+
+    print(f"\n{BOLD}🏛️  Harvesting ATS board tokens{RESET}")
+
+    urls = []
+    try:
+        db = Database()
+        with db._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT job_url FROM jobs WHERE job_url IS NOT NULL AND job_url != ''"
+            ).fetchall()
+        urls.extend(r[0] for r in rows)
+        print(f"  → {len(urls)} URL(s) from {db.db_path}")
+    except Exception as e:
+        print(f"  ⚠ Could not read database: {e}")
+
+    xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
+    if os.path.exists(xlsx_path):
+        try:
+            import openpyxl
+
+            wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+            before = len(urls)
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    for cell in row:
+                        if isinstance(cell, str) and cell.startswith("http"):
+                            urls.append(cell)
+            wb.close()
+            print(f"  → {len(urls) - before} URL(s) from {xlsx_path}")
+        except Exception as e:
+            print(f"  ⚠ Could not read {xlsx_path}: {e}")
+
+    if not urls:
+        print(f"{YELLOW}No URLs to scan. Run a search first.{RESET}")
+        return
+
+    found = ats_boards.harvest_tokens_from_urls(urls)
+    total = sum(len(v) for v in found.values())
+    if not total:
+        print(
+            f"{YELLOW}No Greenhouse/Lever/Ashby links found in {len(urls)} URL(s).{RESET}\n"
+            f"{CYAN}These appear once boards like LinkedIn/Indeed link out to company ATS pages.{RESET}"
+        )
+        return
+
+    for provider, tokens in sorted(found.items()):
+        if tokens:
+            print(f"\n  {BOLD}{provider}{RESET}: {len(tokens)} token(s)")
+            print(f"    {', '.join(sorted(tokens))}")
+
+    if dry_run:
+        print(f"\n{YELLOW}[DRY RUN] Nothing written.{RESET}")
+        return
+
+    added = ats_boards.save_harvested_tokens(found)
+    net = sum(added.values())
+    print(
+        f"\n{GREEN}✅ {net} new token(s) saved to "
+        f"{getattr(config, 'ATS_TOKENS_FILE', 'ats_tokens.json')}{RESET}"
+    )
+    for provider in ("greenhouse", "lever", "ashby"):
+        print(f"  {provider}: +{added.get(provider, 0)} new, {len(ats_boards.board_tokens(provider))} total active")
+    print(f"{CYAN}Next search will include them automatically.{RESET}")
+
+
 def cmd_export_xlsx():
     """Overwrite Excel from SQLite (manual 'Applied on portal' cells may be reset)."""
     import config
@@ -1008,6 +1084,11 @@ Examples:
         action="store_true",
         help="Skip confirmation prompt (required for non-interactive --clear-db)",
     )
+    parser.add_argument(
+        "--harvest-ats",
+        action="store_true",
+        help="Scan collected job URLs for Greenhouse/Lever/Ashby board tokens and save them",
+    )
     args = parser.parse_args()
 
     # Config check (skip for status/list since those don't send emails)
@@ -1029,6 +1110,8 @@ Examples:
             job_title=args.job,
             yes=args.yes,
         )
+    elif args.harvest_ats:
+        cmd_harvest_ats(dry_run=args.dry_run)
     elif args.fill_hr_emails:
         cmd_fill_hr_emails(force=args.force, limit=args.limit, dry_run=args.dry_run)
     elif args.sync_xlsx or args.sync_from_xlsx:

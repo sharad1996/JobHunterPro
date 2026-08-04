@@ -148,7 +148,7 @@ MAX_RESULTS_PER_PLATFORM = 100                   # Max jobs per platform *per co
 MAX_JOB_POSTING_AGE_DAYS = 10
 
 # One-shot batch (--run): find jobs + verified emails + sheet + DB + send for this many new listings.
-BATCH_JOB_LIMIT = 50
+BATCH_JOB_LIMIT = 100
 # In batch mode, skip pattern-guessed emails unless SEND_ONLY_VERIFIED_EMAILS is False.
 BATCH_REQUIRE_VERIFIED_EMAIL = True
 
@@ -170,17 +170,24 @@ TARGET_COUNTRIES = [
 # Default list = sources that work without paywall, OAuth, or anti-bot failures.
 # Use the INCLUDE_* flags below to add optional sources.
 PLATFORMS = [
+    # ── Keyless public APIs / RSS (fast, reliable, run once per search) ──
     "remoteok",
     "remotive",
     "weworkremotely",
-    "justremote",# public Freelancer.com read API (no token)
+    "justremote",
+    "himalayas",
+    "arbeitnow",       # free API, no key — Europe-heavy, many visa-sponsor roles
+    "jobicy",          # free API, no key — remote-only, filtered by TARGET_COUNTRIES
+    # ── ATS boards: direct-to-company, the sources Google for Jobs indexes ──
+    # Coverage = the *_BOARDS token lists below + `python3 main.py --harvest-ats`.
+    "greenhouse",
+    "lever",
+    "ashby",
+    # ── Community ──
+    "hn",              # HN "Ask HN: Who is hiring?" monthly thread (needs MAX_JOB_POSTING_AGE_DAYS ≥ 31)
+    # ── Scraped boards (more fragile) ──
     "linkedin",
     "shine",
-    "arc.dev",
-    "ziprecruiter",
-    "careerbuilder",
-    "dice",
-    "himalayas",
     "japan-dev",
     "indeed",          # needs USE_BROWSER_FETCH=True; often Cloudflare-blocked without --auth-indeed
 ]
@@ -208,7 +215,74 @@ UPWORK_USE_AUTH_STATE = False
 
 # Optional full list for copy-paste into PLATFORMS when you want everything enabled manually:
 # remoteok, remotive, weworkremotely, justremote, skipthedrive, freelancer, upwork,
-# himalayas, flexjobs, wellfound, indeed, linkedin, glassdoor, naukri, shine
+# himalayas, flexjobs, wellfound, indeed, linkedin, glassdoor, naukri, shine,
+# arbeitnow, jobicy, greenhouse, lever, ashby, hn, tokyodev, japan-dev, bayt
+
+# ─────────────────────────────────────────────
+# 🏛️ ATS BOARDS (Greenhouse / Lever / Ashby)
+# ─────────────────────────────────────────────
+# These APIs are keyless and never bot-blocked, but there is NO cross-company search —
+# each company has its own "board token". Coverage = these lists + harvested tokens.
+#
+# Grow the lists automatically from job URLs you've already collected:
+#     python3 main.py --harvest-ats
+# New tokens are appended to ATS_TOKENS_FILE, so coverage compounds every run.
+#
+# To add one by hand, take the token out of the board URL:
+#     job-boards.greenhouse.io/vercel/jobs/123  → "vercel"
+#     jobs.lever.co/shieldai/<uuid>             → "shieldai"
+#     jobs.ashbyhq.com/ramp/<uuid>              → "ramp"
+#
+# Seed lists below were all verified live. Note that FILTER_OUT_BIG_TECH still drops
+# some of them by name (stripe, databricks…) — that filter runs after the fetch.
+GREENHOUSE_BOARDS = [
+    "vercel", "anthropic", "figma", "airtable", "retool", "databricks", "scaleai",
+    "discord", "reddit", "robinhood", "coinbase", "instacart", "affirm", "chime",
+    "gitlab", "elastic", "mongodb", "datadog", "cloudflare", "fastly", "clickhouse",
+    "calendly", "duolingo", "planetscale", "assemblyai", "mercury", "checkr", "brex",
+    "stripe",
+]
+
+LEVER_BOARDS = [
+    "shieldai", "neon",
+]
+
+ASHBY_BOARDS = [
+    "openai", "ramp", "plaid", "notion", "langchain", "replit", "deepgram",
+    "baseten", "supabase", "miro", "sardine", "render", "confluent", "modal",
+    "zapier", "posthog", "railway", "pinecone", "weaviate", "clickhouse", "neon",
+]
+
+# Harvested tokens live here (JSON, gitignored). Deleting it just resets to the lists above.
+ATS_TOKENS_FILE = "ats_tokens.json"
+
+# Lever/Ashby don't return a company name — the token is title-cased instead.
+# Override any that come out wrong.
+ATS_COMPANY_NAMES = {
+    "shieldai": "Shield AI",
+    "openai": "OpenAI",
+    "scaleai": "Scale AI",
+    "assemblyai": "AssemblyAI",
+    "clickhouse": "ClickHouse",
+    "posthog": "PostHog",
+    "langchain": "LangChain",
+    "gitlab": "GitLab",
+    "mongodb": "MongoDB",
+    "planetscale": "PlanetScale",
+    "playstation": "PlayStation",
+}
+
+# Parallel board fetches (public APIs; 6 is polite and fast). Lower if you see timeouts.
+ATS_FETCH_WORKERS = 6
+# Cap per board so one 800-job board can't crowd out the rest.
+ATS_MAX_PER_BOARD = 25
+
+# Arbeitnow pages to walk (~100 jobs/page).
+ARBEITNOW_MAX_PAGES = 3
+
+# HN posts one "Who is hiring?" thread on the 1st of each month and it stays live all
+# month, so it uses its own freshness window instead of MAX_JOB_POSTING_AGE_DAYS.
+HN_MAX_THREAD_AGE_DAYS = 40
 
 # ─────────────────────────────────────────────
 # 🏢 COMPANY FILTERS (small employers, skip megacorps)

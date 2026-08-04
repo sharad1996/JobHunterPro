@@ -16,6 +16,8 @@ from bs4 import BeautifulSoup
 import config
 from job_filters import max_job_posting_age_days
 
+from ats_boards import scrape_ashby, scrape_greenhouse, scrape_lever
+from community_boards import scrape_hn_whoishiring
 from marketplace_boards import scrape_freelancer, scrape_upwork
 from regional_boards import scrape_bayt, scrape_japan_dev, scrape_tokyodev
 from remote_boards import (
@@ -27,6 +29,8 @@ from remote_boards import (
     scrape_flexjobs,
     scrape_wellfound,
     scrape_himalayas,
+    scrape_arbeitnow,
+    scrape_jobicy,
 )
 
 # ─── Shared helpers ────────────────────────────────────────────────────────────
@@ -513,6 +517,15 @@ _GLOBAL_REMOTE_SCRAPERS = {
     "himalayas": scrape_himalayas,
     "tokyodev": scrape_tokyodev,
     "japan-dev": scrape_japan_dev,
+    # Free keyless APIs
+    "arbeitnow": scrape_arbeitnow,
+    "jobicy": scrape_jobicy,
+    # ATS boards — direct-to-company, keyed by board tokens (see ats_boards.py)
+    "greenhouse": scrape_greenhouse,
+    "lever": scrape_lever,
+    "ashby": scrape_ashby,
+    # Community
+    "hn": scrape_hn_whoishiring,
 }
 
 # Per-country scrapers (not in _GLOBAL_REMOTE_SCRAPERS or India-only boards)

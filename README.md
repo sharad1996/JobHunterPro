@@ -1,6 +1,52 @@
 # 🎯 Job Hunter Pro — Auto Apply Tool
 
-A Python tool that automatically searches jobs across **LinkedIn, Indeed, Glassdoor, Naukri, and Shine**, finds HR email addresses, sends your resume, and follows up automatically after 3 days.
+A Python tool that automatically searches jobs across keyless job APIs, company ATS boards,
+and scraped boards, finds HR email addresses, sends your resume, and follows up automatically.
+
+### Where jobs come from
+
+Enabled by default in `config.PLATFORMS` — no keys, no login:
+
+| Source | How | Notes |
+|---|---|---|
+| RemoteOK, Remotive | public JSON API | global remote |
+| We Work Remotely, Himalayas | RSS | global remote |
+| **Arbeitnow** | public JSON API | Europe-heavy, many visa-sponsor roles |
+| **Jobicy** | public JSON API | remote-only; `geo` filter per `TARGET_COUNTRIES` |
+| **Greenhouse, Lever, Ashby** | public ATS API | direct-to-company — see below |
+| **HN "Who is hiring?"** | Algolia API | monthly thread; small companies, founder emails |
+| LinkedIn | HTML scrape | per country; most productive but most fragile |
+| Shine | HTML scrape | India only |
+| Japan Dev | HTML scrape | Japan |
+| Indeed | HTML + Playwright | needs `USE_BROWSER_FETCH = True`, else Cloudflare-blocked |
+
+Implemented but off by default — add to `PLATFORMS` to enable: `naukri`, `glassdoor`,
+`bayt`, `tokyodev`, `skipthedrive`, `freelancer`, `justremote`, `wellfound` (Playwright),
+`upwork` (OAuth token).
+
+#### Greenhouse / Lever / Ashby board tokens
+
+These three are the boards Google for Jobs indexes. Their APIs are keyless and never
+bot-blocked, but there is **no cross-company search** — each company has its own board
+token, so coverage equals your token list:
+
+```bash
+python3 main.py --harvest-ats        # scan collected URLs for new company boards
+python3 main.py --harvest-ats --dry-run
+```
+
+Seed lists live in `config.py` (`GREENHOUSE_BOARDS` / `LEVER_BOARDS` / `ASHBY_BOARDS`).
+Harvested tokens are appended to `ats_tokens.json` (gitignored), so coverage compounds
+every run. HN and LinkedIn results frequently link straight at an ATS board, which is
+what makes the harvest pay off.
+
+To add one by hand, take the token out of the board URL:
+
+```
+job-boards.greenhouse.io/vercel/jobs/123  → "vercel"
+jobs.lever.co/shieldai/<uuid>             → "shieldai"
+jobs.ashbyhq.com/ramp/<uuid>              → "ramp"
+```
 
 ---
 
@@ -10,7 +56,12 @@ A Python tool that automatically searches jobs across **LinkedIn, Indeed, Glassd
 JobHunterPro/
 ├── main.py           ← Entry point — run this
 ├── config.py         ← ⭐ YOUR SETTINGS (edit this first!)
-├── scrapers.py       ← Scrapes job listings from all platforms
+├── scrapers.py       ← Aggregates every source; LinkedIn/Indeed/Glassdoor/Naukri/Shine
+├── remote_boards.py  ← RemoteOK, Remotive, WWR, Himalayas, Arbeitnow, Jobicy
+├── ats_boards.py     ← Greenhouse, Lever, Ashby + board-token harvesting
+├── community_boards.py ← HN "Ask HN: Who is hiring?"
+├── regional_boards.py← TokyoDev, Japan Dev, Bayt
+├── marketplace_boards.py ← Freelancer, Upwork
 ├── email_finder.py   ← Finds HR email addresses via Hunter.io
 ├── email_sender.py   ← Sends emails via Gmail
 ├── templates.py      ← Application & follow-up email templates
@@ -132,11 +183,19 @@ Open `templates.py` to edit:
 
 | Setting | Default | Description |
 |---|---|---|
-| `FOLLOW_UP_DAYS` | 3 | Days before follow-up is sent |
+| `FOLLOW_UP_DAYS` | 2 | Days before follow-up is sent |
 | `MAX_JOB_POSTING_AGE_DAYS` | 10 | Only jobs posted within this many days (use 7–10 for a tighter window) |
-| `MAX_RESULTS_PER_PLATFORM` | 15 | Max jobs fetched per platform |
-| `JOB_LOCATION` | "India" | Location for job search |
-| `PLATFORMS` | all 5 | Which platforms to search |
+| `MAX_RESULTS_PER_PLATFORM` | 100 | Max jobs fetched per platform, per country |
+| `JOB_LOCATION` | "India" | Location used only when `REMOTE_ONLY = False` |
+| `TARGET_COUNTRIES` | India, Germany, Dubai | One regional search each for LinkedIn/Indeed/Glassdoor/Bayt |
+| `PLATFORMS` | see table above | Which sources to search |
+| `DEDUPE_BY_COMPANY_NAME` | True | Keeps only the **first listing per company** — biggest throughput lever |
+| `USE_BROWSER_FETCH` | False | Playwright for Indeed/Glassdoor/Wellfound/Bayt; required for Indeed |
+| `GREENHOUSE_BOARDS` etc. | seed list | ATS board tokens; grow with `--harvest-ats` |
+| `ATS_MAX_PER_BOARD` | 25 | Cap per ATS board so one 800-job board can't crowd out the rest |
+| `ATS_FETCH_WORKERS` | 6 | Parallel ATS board fetches |
+| `ARBEITNOW_MAX_PAGES` | 3 | Arbeitnow pages to walk (~100 jobs/page) |
+| `HN_MAX_THREAD_AGE_DAYS` | 40 | HN threads are monthly, so they get their own freshness window |
 
 ---
 
@@ -149,7 +208,20 @@ Open `templates.py` to edit:
 → Make sure `resume.pdf` is in the same folder as `main.py`
 
 **"No jobs found"**
-→ Check your internet connection. LinkedIn may block scrapers — try Indeed or Naukri first.
+→ The keyless APIs (RemoteOK, Remotive, Arbeitnow, Jobicy, Greenhouse, Ashby, HN) don't get
+   blocked, so if those return zero the filters are the cause, not the network. Try widening
+   `MAX_JOB_POSTING_AGE_DAYS`, adding `TARGET_COUNTRIES`, or setting
+   `DEDUPE_BY_COMPANY_NAME = False`.
+
+**"Greenhouse/Lever/Ashby: skipped — no board tokens"**
+→ Those APIs have no cross-company search. Add tokens to `config.py` or run
+   `python3 main.py --harvest-ats`.
+
+**"HN: newest thread is Nd old"**
+→ Raise `HN_MAX_THREAD_AGE_DAYS`. Threads post on the 1st of each month.
+
+**"Indeed: Blocked (HTTP 403)"**
+→ Set `USE_BROWSER_FETCH = True` and install Playwright (see INTEGRATIONS.md).
 
 **"No HR emails found"**
 → Set up your Hunter.io API key. Without it, the tool guesses `hr@company.com` patterns.

@@ -606,9 +606,13 @@ def find_hr_email_for_company(
     return result
 
 
-def find_hr_emails(jobs: list) -> list:
+def find_hr_emails(jobs: list, history=None) -> list:
     """
     Enriches each job dict with `hr_email` and `hr_name` fields.
+
+    When `history` (an OutreachHistory) is supplied, companies whose address is already
+    in the database reuse it instead of re-scraping contact pages — the lookup costs
+    several HTTP requests per company, so this is where the time goes.
     """
     print("\n📧 Finding company domains & HR emails (contact pages)…")
     if not getattr(config, "CONTACT_PAGE_SCRAPE_ENABLED", True):
@@ -618,40 +622,48 @@ def find_hr_emails(jobs: list) -> list:
 
     enriched = []
     total = len(jobs)
+    reused = 0
 
     for i, job in enumerate(jobs, 1):
         company = job.get("company", "") or ""
         job_url = job.get("url", "") or ""
         print(f"  [{i}/{total}] {company[:56]}", end="  ", flush=True)
 
-        result = find_hr_email_for_company(company, job_url)
+        cached = history.known_email(company) if history is not None else None
+        if cached:
+            result = dict(cached)
+            reused += 1
+        else:
+            result = find_hr_email_for_company(company, job_url)
         job["domain_candidates"] = result.get("domain_candidates") or []
         if result.get("domain"):
             job["domain"] = result["domain"]
 
         if result.get("hr_email"):
-            note = ""
-            if result.get("hr_email_verified"):
-                src = result.get("contact_source_url") or ""
-                if src:
-                    note = "  [contact page]"
+            if cached:
+                note = "  [known company email — lookup skipped]"
+            elif result.get("hr_email_verified"):
+                note = "  [contact page]" if result.get("contact_source_url") else ""
             else:
                 note = "  [guessed — not on contact page]"
             job.update(result)
             print(f"→ {result.get('hr_email', '?')}{note}")
         else:
             job["hr_email"] = ""
-            job["domain"] = job.get("domain") or (candidates[0] if candidates else "")
+            cands = result.get("domain_candidates") or []
+            job["domain"] = job.get("domain") or (cands[0] if cands else "")
             print("→ Not found (use job URL to apply on-site or find contacts manually)")
 
         enriched.append(job)
-        time.sleep(0.25)
+        if not cached:
+            time.sleep(0.25)
 
     found = sum(1 for j in enriched if j.get("hr_email"))
     verified = sum(1 for j in enriched if j.get("hr_email") and j.get("hr_email_verified"))
+    suffix = f" — {reused} reused a known address (no lookup)" if reused else ""
     print(
         f"\n  ✅ Resolved at least one address for {found}/{total} listing(s) "
-        f"({verified} from contact pages)"
+        f"({verified} from contact pages){suffix}"
     )
     return enriched
 

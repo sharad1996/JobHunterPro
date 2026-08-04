@@ -196,6 +196,30 @@ Open `templates.py` to edit:
 | `ATS_FETCH_WORKERS` | 6 | Parallel ATS board fetches |
 | `ARBEITNOW_MAX_PAGES` | 3 | Arbeitnow pages to walk (~100 jobs/page) |
 | `HN_MAX_THREAD_AGE_DAYS` | 40 | HN threads are monthly, so they get their own freshness window |
+| `SKIP_ALREADY_EMAILED_SAME_ROLE` | True | Skip listings already emailed for the same company + role |
+| `SKIP_ALREADY_EMAILED_ANY_ROLE` | False | Stricter — skip any company emailed for *any* role |
+| `REUSE_KNOWN_COMPANY_EMAILS` | True | Reuse an address already in the DB instead of re-scraping |
+| `REUSE_ONLY_VERIFIED_COMPANY_EMAILS` | True | Only reuse contact-page addresses, not pattern guesses |
+
+---
+
+## ⚡ Why repeat runs are fast
+
+Finding an HR email costs **~12s per company** (domain guess → contact-page fetches →
+sometimes a DuckDuckGo hop), and it's by far the slowest step — 100 listings is ~20 minutes
+of lookups. The old skip list only matched *identical job URLs*, so a second listing from a
+company you'd already emailed paid full price for an answer that was already in the database.
+
+`outreach_history.py` loads the whole history in one query (~4ms) and short-circuits two ways:
+
+1. **Already emailed this company + role** → the listing is dropped *before* any network
+   call. No lookup, no duplicate application.
+2. **Address already known for this company** → reuse it, skipping the lookup, while still
+   allowing an application to a genuinely different role.
+
+Matching normalises case, punctuation, and legal suffixes (`Acme Corp.` = `ACME Inc` =
+`acme`) but is never fuzzy, so a different role at a known company still goes out. Only rows
+with `email_status = 'sent'` block a listing — `pending` rows still get sent.
 
 ---
 

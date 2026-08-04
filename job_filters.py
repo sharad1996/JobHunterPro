@@ -64,6 +64,11 @@ def passes_posting_age(job: dict) -> bool:
     return posted_at_within_window(dt)
 
 
+def normalize_company_name(name: str) -> str:
+    """Public company-name normaliser (shared with outreach_history)."""
+    return _norm_company(name)
+
+
 def _norm_company(name: str) -> str:
     if not name:
         return ""

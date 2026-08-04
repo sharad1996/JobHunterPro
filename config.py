@@ -309,6 +309,29 @@ SKIP_JOBS_WITHOUT_HEADCOUNT_DATA = False
 DEDUPE_BY_COMPANY_NAME = True
 
 # ─────────────────────────────────────────────
+# 🧠 OUTREACH HISTORY (skip re-work — the HR-email lookup is the slowest step)
+# ─────────────────────────────────────────────
+# Finding an address costs several HTTP requests per company. The URL skip list only
+# catches identical job URLs, so a second listing from a company already emailed used to
+# pay full price for an answer already in the database. These settings reuse that history.
+
+# Skip a listing entirely when an application was already SENT for the same
+# company + role. No lookup, no duplicate email. This is the main time saver.
+SKIP_ALREADY_EMAILED_SAME_ROLE = True
+
+# Stricter: skip a company we've emailed for ANY role. Turn on if you only ever want to
+# contact each company once; leave False to still apply to genuinely different roles.
+SKIP_ALREADY_EMAILED_ANY_ROLE = False
+
+# When a company's address is already known, reuse it instead of re-scraping contact
+# pages. Cuts the lookup to zero requests for every company seen before.
+REUSE_KNOWN_COMPANY_EMAILS = True
+
+# Only reuse addresses that were verified on a contact page (not pattern guesses).
+# Set False to also reuse guessed hr@… addresses.
+REUSE_ONLY_VERIFIED_COMPANY_EMAILS = True
+
+# ─────────────────────────────────────────────
 # 📑 EXCEL TRACKING (skip already-applied / already-emailed URLs)
 # ─────────────────────────────────────────────
 JOB_TRACKING_XLSX = "job_tracking.xlsx"

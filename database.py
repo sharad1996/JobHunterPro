@@ -208,6 +208,22 @@ class Database:
         with self._get_conn() as conn:
             conn.execute("UPDATE jobs SET reply_received=1 WHERE id=?", (job_id,))
 
+    def get_outreach_history_rows(self) -> list:
+        """
+        Every row needed to decide "have we already emailed this company+role, and do we
+        already know an address for it?" — one query, consumed by outreach_history.
+
+        Cheap even at tens of thousands of rows, and it saves a multi-request HR-email
+        lookup per company that's already known.
+        """
+        with self._get_conn() as conn:
+            return conn.execute(
+                """SELECT company, job_title, hr_email, hr_name, company_domain,
+                          hr_email_verified, email_status
+                   FROM jobs
+                   WHERE company IS NOT NULL AND company != ''"""
+            ).fetchall()
+
     def get_sent_job_urls(self) -> list:
         """Normalized URLs that already had an application email marked sent."""
         with self._get_conn() as conn:

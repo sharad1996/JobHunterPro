@@ -85,8 +85,16 @@ def _job_ready_for_batch(job: dict, *, require_verified: bool) -> bool:
     return True
 
 
-def _select_jobs_for_batch(jobs: list, skip_urls: set, limit: int) -> list:
-    """Find verified HR emails until `limit` new jobs are ready (stops early)."""
+def _select_jobs_for_batch(
+    jobs: list, skip_urls: set, limit: int, history=None, search_title: str = ""
+) -> list:
+    """
+    Find verified HR emails until `limit` new jobs are ready (stops early).
+
+    `history` (OutreachHistory) short-circuits the expensive lookup twice over: jobs whose
+    company+role were already emailed are dropped without any network calls, and companies
+    with a known address reuse it instead of re-scraping contact pages.
+    """
     import time
 
     import config
@@ -99,6 +107,8 @@ def _select_jobs_for_batch(jobs: list, skip_urls: set, limit: int) -> list:
 
     selected = []
     scanned = 0
+    skipped_history = 0
+    reused = 0
     for job in jobs:
         if len(selected) >= limit:
             break
@@ -106,30 +116,59 @@ def _select_jobs_for_batch(jobs: list, skip_urls: set, limit: int) -> list:
         nu = job_tracking.normalize_job_url(url)
         if nu and nu in skip_urls:
             continue
-        scanned += 1
         company = job.get("company", "") or ""
+
+        # Already emailed for this company+role → no lookup, no duplicate application.
+        if history is not None and history.already_emailed(
+            company, search_title, job.get("title") or ""
+        ):
+            skipped_history += 1
+            if nu:
+                skip_urls.add(nu)
+            continue
+
+        scanned += 1
         print(f"  [{len(selected) + 1}/{limit} target] {company[:52]}", end="  ", flush=True)
-        result = find_hr_email_for_company(
-            company,
-            url,
-            job.get("company_website") or job.get("domain") or "",
-            allow_guesses=not require_verified,
-        )
+
+        cached = history.known_email(company) if history is not None else None
+        if cached:
+            result = dict(cached)
+            reused += 1
+        else:
+            result = find_hr_email_for_company(
+                company,
+                url,
+                job.get("company_website") or job.get("domain") or "",
+                allow_guesses=not require_verified,
+            )
         job.update(result)
         if result.get("domain"):
             job["domain"] = result["domain"]
         if _job_ready_for_batch(job, require_verified=require_verified):
             selected.append(job)
-            tag = "contact page" if job.get("hr_email_verified") else "email"
+            if cached:
+                tag = "known company email"
+            else:
+                tag = "contact page" if job.get("hr_email_verified") else "email"
             print(f"→ {job['hr_email']}  [{tag}]")
             if nu:
                 skip_urls.add(nu)
         else:
             em = job.get("hr_email") or ""
             print(f"→ skip ({em or 'no email'})")
-        time.sleep(0.2)
+        if not cached:
+            time.sleep(0.2)
 
-    print(f"\n  Scanned {scanned} new listing(s), selected {len(selected)} with sendable email.")
+    notes = []
+    if skipped_history:
+        notes.append(f"{skipped_history} skipped as already emailed")
+    if reused:
+        notes.append(f"{reused} reused a known address")
+    suffix = f" ({', '.join(notes)})" if notes else ""
+    print(
+        f"\n  Scanned {scanned} new listing(s), selected {len(selected)} "
+        f"with sendable email.{suffix}"
+    )
     return selected
 
 
@@ -212,8 +251,15 @@ def cmd_run_batch(job_title: str, dry_run: bool = False, limit: int = None):
         print(f"{RED}No new jobs after filters.{RESET}")
         return
 
+    from outreach_history import OutreachHistory
+
+    history = OutreachHistory.load(db)
+    print(f"\n🧠 Outreach history: {history.summary()}")
+
     print(f"\n📧 Finding contact-page emails (target {limit} jobs)…")
-    selected = _select_jobs_for_batch(jobs, skip_urls, limit)
+    selected = _select_jobs_for_batch(
+        jobs, skip_urls, limit, history=history, search_title=job_title
+    )
     if not selected:
         print(
             f"{RED}\nNo sendable emails found in this batch. "
@@ -322,6 +368,31 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
         print(f"{RED}No jobs left after filters / skip list. Adjust config or your tracking sheet.{RESET}")
         return
 
+    # Drop company+role combos already emailed BEFORE the HR-email lookup — that lookup
+    # is the slowest step in the run, so paying it for a job we'd never send is pure waste.
+    from outreach_history import OutreachHistory
+
+    history = OutreachHistory.load(db)
+    print(f"\n🧠 Outreach history: {history.summary()}")
+    before_history = len(jobs)
+    jobs = [
+        j
+        for j in jobs
+        if not history.already_emailed(j.get("company", ""), job_title, j.get("title") or "")
+    ]
+    if before_history != len(jobs):
+        print(
+            f"  ⏭️  {before_history - len(jobs)} listing(s) already emailed for this "
+            f"company+role — skipped before email lookup"
+        )
+
+    if not jobs:
+        print(
+            f"{RED}Every listing was already emailed for this role. "
+            f"Try a different job title.{RESET}"
+        )
+        return
+
     print(f"\n{GREEN}✅ {len(jobs)} listing(s) after filters & skip rules{RESET}")
 
     xlsx_path = getattr(config, "JOB_TRACKING_XLSX", "job_tracking.xlsx")
@@ -335,7 +406,7 @@ def cmd_search_and_apply(job_title: str, dry_run: bool = False):
     except Exception as e:
         print(f"{YELLOW}⚠️  Could not write initial rows to {xlsx_path}: {e}{RESET}")
 
-    jobs_enriched = find_hr_emails(jobs)
+    jobs_enriched = find_hr_emails(jobs, history=history)
 
     # Save / refresh jobs in DB (duplicates must be updated or HR emails stay empty)
     new_count = 0
